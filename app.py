@@ -6,7 +6,7 @@ import plotly.express as px
 import time  # 시간 제어를 위해 추가
 
 # 1. API 설정
-API_KEY = st.secrets["AIzaSyA5fVDWlybF-KgIB0DE-BgACb7xUUkcc9Y"] # (O) 반드시 이대로 적어주세요!
+API_KEY = st.secrets["YOUTUBE_API_KEY"]
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 
 # 2. 데이터 수집 함수
@@ -84,3 +84,4 @@ if video_url:
         time.sleep(refresh_sec)
 
         st.rerun()
+

@@ -17,7 +17,7 @@ def get_comments(video_id):
         request = youtube.commentThreads().list(
             part="snippet",
             videoId=video_id,
-            maxResults=50,
+            maxResults=200,
             order="time"  # 실시간 모니터링을 위해 '최신순'으로 가져옵니다
         )
         response = request.execute()
@@ -85,5 +85,6 @@ if video_url:
         time.sleep(refresh_sec)
 
         st.rerun()
+
 
 

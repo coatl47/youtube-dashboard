@@ -11,24 +11,34 @@ API_KEY = st.secrets["YOUTUBE_API_KEY"]
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 
 # 2. 데이터 수집 함수
-def get_comments(video_id):
-    comments_data = []
-    try:
+def get_all_comments(video_id, max_count=500):
+    comments = []
+    next_page_token = None
+    
+    while len(comments) < max_count:
+        # API 호출
         request = youtube.commentThreads().list(
             part="snippet",
             videoId=video_id,
-            maxResults=200,
-            order="time"  # 실시간 모니터링을 위해 '최신순'으로 가져옵니다
+            maxResults=100, # 한 번에 가져올 최대치
+            pageToken=next_page_token,
+            order="time" # 최신순 (relevance로 바꾸면 인기순)
         )
         response = request.execute()
         
+        # 댓글 추출
         for item in response['items']:
             comment = item['snippet']['topLevelComment']['snippet']['textDisplay']
-            comments_data.append(comment)
-        return comments_data
-    except Exception as e:
-        st.error(f"API 호출 오류: {e}")
-        return []
+            comments.append(comment)
+            if len(comments) >= max_count:
+                break
+        
+        # 다음 페이지가 있는지 확인
+        next_page_token = response.get('nextPageToken')
+        if not next_page_token: # 다음 페이지가 없으면 중단
+            break
+            
+    return comments
 
 # 3. Streamlit UI 구성
 st.set_page_config(page_title="YouTube Live Dashboard", layout="wide")
@@ -85,6 +95,7 @@ if video_url:
         time.sleep(refresh_sec)
 
         st.rerun()
+
 
 
 

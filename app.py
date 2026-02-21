@@ -14,12 +14,23 @@ GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# [핵심 수정] 드롭다운 기본값인 'gemini-3-pro'를 직접 호출합니다.
-# 만약 3 Pro에서 에러가 나면 'gemini-3-flash'로 시도하도록 구성했습니다.
-try:
-    model = genai.GenerativeModel('gemini-3-pro')
-except:
-    model = genai.GenerativeModel('gemini-3-flash')
+# [핵심] 사용 가능한 모델을 자동으로 찾는 함수
+def get_best_model():
+    try:
+        # 현재 API 키로 사용 가능한 모델 리스트 확인
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 1순위: gemini-3-pro, 2순위: gemini-3-flash, 3순위: gemini-1.5-flash
+        for target in ['models/gemini-3-pro', 'models/gemini-3-flash', 'models/gemini-1.5-flash']:
+            if target in models:
+                return genai.GenerativeModel(target)
+        
+        # 리스트에 있는 것 중 아무거나 첫 번째 모델 반환
+        if models:
+            return genai.GenerativeModel(models[0])
+    except Exception as e:
+        st.error(f"모델 목록을 불러오는 중 오류 발생: {e}")
+    return None
 
 # 2. 데이터 수집 함수 (기존 로직 유지)
 @st.cache_data(ttl=600)
@@ -50,8 +61,14 @@ def get_comms(v_id, limit=50):
 # 3. AI 분석 함수
 def analyze_ai(df):
     if df.empty: return pd.DataFrame()
-    raw_txt = "\n".join([f"- {t[:150]}" for t in df['text']])
     
+    # 자동으로 모델 선택
+    model = get_best_model()
+    if not model:
+        st.error("사용 가능한 Gemini 모델을 찾을 수 없습니다.")
+        return pd.DataFrame()
+        
+    raw_txt = "\n".join([f"- {t[:120]}" for t in df['text']])
     prompt = f"""
     당신은 전문 데이터 분석가입니다. 다음 유튜브 댓글들을 분석하세요.
     1. 핵심 주제(분류)를 영상 내용에 맞게 생성하세요 (최대 9개).
@@ -66,7 +83,6 @@ def analyze_ai(df):
         response = model.generate_content(prompt)
         res_txt = response.text.strip()
         
-        # 데이터프레임 변환 (헤더 기준 정제)
         if "감성|분류" in res_txt:
             start_idx = res_txt.find("감성|분류")
             clean_csv = res_txt[start_idx:].replace('```csv', '').replace('```', '').strip()
@@ -80,7 +96,7 @@ def analyze_ai(df):
 
 # 4. UI 구성
 st.set_page_config(page_title="유튜브 분석 대시보드", layout="wide")
-st.title("📊 유튜브 실시간 여론 분석 (Gemini 3 Pro)")
+st.title("📊 유튜브 실시간 여론 분석 (자동 모델 매칭)")
 
 url = st.text_input("유튜브 URL을 입력하세요")
 
@@ -88,7 +104,7 @@ if url:
     m = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', url)
     if m:
         vid = m.group(1)
-        with st.status("최신 Gemini 3 모델로 분석 중...", expanded=True) as status:
+        with st.status("최적의 모델을 찾아 분석 중...", expanded=True) as status:
             info = get_stats(vid)
             raw = get_comms(vid)
             final = analyze_ai(raw)
@@ -108,7 +124,7 @@ if url:
             m3.metric("댓글 수", f"{info['c_count']:,}")
             m4.metric("최종 업데이트", datetime.now().strftime('%H:%M'))
 
-            # 차트 시각화
+            # 차트 영역
             c1, c2 = st.columns(2)
             with c1:
                 st.subheader("📈 시간대별 댓글 추이")
@@ -121,13 +137,10 @@ if url:
                 st.plotly_chart(px.pie(s_counts, names='감성', values='count', 
                                        color='감성', color_discrete_map={'긍정':'#00CC96','부정':'#EF553B','중립':'#AB63FA'}), use_container_width=True)
 
-            # 분류별 막대 그래프
-            st.subheader("📁 주제별 여론 분석 (최대 9개)")
+            st.subheader("📁 주제별 여론 분석")
             b_data = final.groupby(['분류', '감성']).size().reset_index(name='v')
             st.plotly_chart(px.bar(b_data, x='v', y='분류', color='감성', orientation='h',
                                    color_discrete_map={'긍정':'#00CC96','부정':'#EF553B','중립':'#AB63FA'}), use_container_width=True)
 
-            # 데이터 테이블
-            st.subheader("📋 전체 상세 데이터")
+            st.subheader("📋 분석 데이터 리스트")
             st.dataframe(final, use_container_width=True)
-            st.download_button("결과 CSV 다운로드", final.to_csv(index=False).encode('utf-8-sig'), f"analysis_{vid}.csv")

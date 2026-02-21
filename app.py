@@ -49,7 +49,7 @@ st.sidebar.header("🔄 자동 갱신 설정")
 refresh_sec = st.sidebar.slider("갱신 주기 (초)", 30, 60, 30)
 run_auto = st.sidebar.checkbox("자동 갱신 실행", value=True)
 
-video_url = st.text_input("https://youtu.be/fNHLffyXnQM?si=-ueDExEYzsvRdeNk")
+video_url = st.text_input("https://www.youtube.com/watch?v=fNHLffyXnQM")
 
 if video_url:
     # 비디오 ID 추출 (주소 형식이 달라도 대응 가능하도록 수정)
@@ -95,6 +95,7 @@ if video_url:
         time.sleep(refresh_sec)
 
         st.rerun()
+
 
 
 

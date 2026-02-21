@@ -43,6 +43,10 @@ def get_all_comments(video_id, max_count=500):
 st.set_page_config(page_title="YouTube Live Dashboard", layout="wide")
 st.title("📊 유튜브 실시간 댓글 분석 대시보드")
 
+st.write("---")
+st.write("✅ 시스템이 정상적으로 코드를 읽고 있습니다.")
+st.write("---")
+
 # 사이드바 설정
 st.sidebar.header("🔄 자동 갱신 설정")
 refresh_sec = st.sidebar.slider("갱신 주기 (초)", 10, 60, 30)
@@ -96,3 +100,4 @@ if video_url:
     if run_auto:
         time.sleep(refresh_sec)
         st.rerun()
+

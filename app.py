@@ -51,7 +51,7 @@ def get_comments_with_time(video_id, max_count=100):
 # 3. AI 분석 함수 (감성, 분류, 키워드 한 번에 추출)
 def analyze_comments_ai(df):
     # 분석 성능을 위해 최대 50개씩 묶어서 처리하거나 샘플링 권장
-    sample_text = "\n".join([f"- {c}" for c in df['comment'].head(30)])
+    sample_text = "\n".join([f"- {c}" for c in df['comment'].head(10)])
     
     prompt = f"""
     아래 유튜브 댓글들을 분석해서 각 댓글별로 [감성, 분류, 키워드]를 추출해줘.
@@ -138,4 +138,5 @@ if video_url:
     # CSV 다운로드 버튼
     csv = analysis_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("CSV 다운로드", csv, "analysis_result.csv", "text/csv")
+
 

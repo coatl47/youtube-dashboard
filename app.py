@@ -7,6 +7,7 @@ import re
 import time
 from datetime import datetime
 
+
 # 1. 설정 및 API 연결
 API_KEY = st.secrets["YOUTUBE_API_KEY"]
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"] # Gemini API 키 필요
@@ -137,3 +138,4 @@ if video_url:
     # CSV 다운로드 버튼
     csv = analysis_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("CSV 다운로드", csv, "analysis_result.csv", "text/csv")
+

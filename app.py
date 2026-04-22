@@ -316,7 +316,7 @@ def render_charts(raw_df: pd.DataFrame, res_df: pd.DataFrame):
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("📈 시간대별 댓글 추이")
-        trend = raw_df.set_index("time").resample("H").size().reset_index(name="댓글 수")
+        trend = raw_df.set_index("time").resample("h").size().reset_index(name="댓글 수")
         st.plotly_chart(
             px.line(trend, x="time", y="댓글 수", markers=True),
             use_container_width=True,

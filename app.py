@@ -14,22 +14,12 @@ GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# [핵심] 사용 가능한 모델을 자동으로 찾는 함수
+# analyze_ai 함수 내부의 모델 선택 로직 수정
 def get_best_model():
-    try:
-        # 현재 API 키로 사용 가능한 모델 리스트 확인
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 1순위: gemini-3-pro, 2순위: gemini-3-flash, 3순위: gemini-1.5-flash
-        for target in ['models/gemini-3-pro', 'models/gemini-3-flash', 'models/gemini-1.5-flash']:
-            if target in models:
-                return genai.GenerativeModel(target)
-        
-        # 리스트에 있는 것 중 아무거나 첫 번째 모델 반환
-        if models:
-            return genai.GenerativeModel(models[0])
-    except Exception as e:
-        st.error(f"모델 목록을 불러오는 중 오류 발생: {e}")
+    # Pro 대신 Flash 모델을 1순위로 호출 (무료 할당량이 더 많음)
+    for target in ['models/gemini-3-flash', 'models/gemini-1.5-flash']:
+        if target in [m.name for m in genai.list_models()]:
+            return genai.GenerativeModel(target)
     return None
 
 # 2. 데이터 수집 함수 (기존 로직 유지)

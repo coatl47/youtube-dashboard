@@ -40,12 +40,10 @@ class Config:
     # list_models()를 쓰지 않고 직접 시도할 모델 순서
     # Flash 계열만 사용 (Pro 계열은 할당량 소진 빠름)
     GEMINI_MODEL_PRIORITY = [
-        "gemini-2.0-flash",       # 1순위: 최신 Flash, 무료 할당량 가장 넉넉
-        "gemini-1.5-flash",       # 2순위: 안정적인 Flash
-        "gemini-1.5-flash-8b",    # 3순위: 경량 Flash (토큰 한도 낮지만 빠름)
+        "gemini-2.5-flash",       # 1순위: 안정적, Tier1 시 RPM 대폭 상승
+        "gemini-2.5-flash-lite",  # 2순위: 무료 RPD 1,000 (단, 2026.06.01 종료 예정)
+        "gemini-1.5-flash",       # 3순위: fallback용
     ]
-
-    # ── 댓글 수집 ───────────────────────────────────────────
     COMMENT_LIMIT = 40            # 분석 댓글 수 (50→40으로 축소해 토큰 절약)
     COMMENT_MIN_LENGTH = 5        # 이 글자 수 미만 댓글 제외
     BATCH_SIZE = 20               # 배치당 댓글 수 (한 번에 너무 많으면 RPM 초과)

@@ -439,14 +439,17 @@ def chart_donut(res_df: pd.DataFrame) -> go.Figure:
         sort=False,
     ))
     fig.update_layout(
-        **BASE, height=340,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
+        margin=dict(l=8, r=90, t=8, b=8),
+        height=340,
         legend=dict(
             orientation="v", x=1.02, y=0.5,
             xanchor="left", yanchor="middle",
             font=dict(size=12),
             itemsizing="constant",
         ),
-        margin=dict(l=8, r=90, t=8, b=8),
     )
     return fig
 

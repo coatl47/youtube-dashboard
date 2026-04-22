@@ -1,9 +1,10 @@
 """
 유튜브 실시간 여론 분석 대시보드
-- 구조: config / data / ai / ui 레이어 분리
-- 안정성: 세밀한 예외처리 및 입력 검증
-- 성능: 모델 선택 캐싱, 분석 결과 캐싱
-- UX: 단계별 진행 상황, 실패 시 구체적 안내
+- Gemini 무료 할당량 최적화 버전
+  · list_models() API 호출 제거 → 모델 직접 fallback 시도
+  · genai.configure() 모듈 레벨 1회 실행
+  · 댓글 배치(20개) 분할 처리로 RPM·토큰 부담 분산
+  · 분석 결과 24시간 캐싱으로 재분석 방지
 """
 
 import io
@@ -21,7 +22,7 @@ from googleapiclient.errors import HttpError
 
 
 # ============================================================
-# 0. 페이지 설정 (반드시 최상단에 위치)
+# 0. 페이지 설정 (최상단 필수)
 # ============================================================
 st.set_page_config(
     page_title="유튜브 여론 분석",
@@ -32,48 +33,85 @@ st.set_page_config(
 
 
 # ============================================================
-# 1. CONFIG 레이어
+# 1. CONFIG
 # ============================================================
 class Config:
-    """앱 전역 설정값을 한 곳에서 관리합니다."""
-
-    # Gemini: 실제 존재하는 모델만, 할당량 넉넉한 순서로 정렬
+    # ── Gemini ──────────────────────────────────────────────
+    # list_models()를 쓰지 않고 직접 시도할 모델 순서
+    # Flash 계열만 사용 (Pro 계열은 할당량 소진 빠름)
     GEMINI_MODEL_PRIORITY = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-8b",
+        "gemini-2.0-flash",       # 1순위: 최신 Flash, 무료 할당량 가장 넉넉
+        "gemini-1.5-flash",       # 2순위: 안정적인 Flash
+        "gemini-1.5-flash-8b",    # 3순위: 경량 Flash (토큰 한도 낮지만 빠름)
     ]
 
-    # 댓글 수집
-    COMMENT_LIMIT = 50          # 분석할 최대 댓글 수
-    COMMENT_MIN_LENGTH = 5      # 너무 짧은 댓글(이모지만 등) 제외
+    # ── 댓글 수집 ───────────────────────────────────────────
+    COMMENT_LIMIT = 40            # 분석 댓글 수 (50→40으로 축소해 토큰 절약)
+    COMMENT_MIN_LENGTH = 5        # 이 글자 수 미만 댓글 제외
+    BATCH_SIZE = 20               # 배치당 댓글 수 (한 번에 너무 많으면 RPM 초과)
 
-    # AI 재시도
+    # ── AI 재시도 ───────────────────────────────────────────
     MAX_RETRIES = 3
-    RETRY_BASE_WAIT = 15        # 초 (429 시 15 -> 30 -> 45초)
+    RETRY_BASE_WAIT = 20          # 429 시 20→40→60초 대기
 
-    # 감성 레이블 (AI가 이 값만 쓰도록 강제)
+    # ── 감성 레이블 ─────────────────────────────────────────
     SENTIMENT_LABELS = ["긍정", "부정", "중립"]
     SENTIMENT_COLORS = {"긍정": "#00CC96", "부정": "#EF553B", "중립": "#AB63FA"}
 
 
 # ============================================================
-# 2. DATA 레이어 — YouTube API
+# 2. Gemini 초기화 (모듈 레벨 1회 실행)
+# ============================================================
+# genai.configure()를 함수 안에서 반복 호출하면
+# 세션마다 인증 오버헤드가 발생하므로 최상위에서 1회만 실행합니다.
+try:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+except Exception as _cfg_err:
+    st.error(f"❌ Gemini API 키 설정 오류: {_cfg_err}")
+
+
+@st.cache_resource(show_spinner=False)
+def _get_gemini_model():
+    """
+    list_models() API를 호출하지 않고,
+    우선순위 모델을 순서대로 직접 인스턴스화해 동작하는 모델을 반환합니다.
+    캐싱(cache_resource)으로 앱 기동 후 1회만 실행됩니다.
+    """
+    for model_name in Config.GEMINI_MODEL_PRIORITY:
+        try:
+            model = genai.GenerativeModel(model_name)
+            # 빈 프롬프트로 실제 연결 가능 여부를 확인합니다
+            model.generate_content("ping", generation_config={"max_output_tokens": 1})
+            return model, model_name
+        except Exception as e:
+            err = str(e)
+            # 모델이 존재하지 않는 경우 → 다음 후보로 넘어감
+            if "not found" in err.lower() or "404" in err:
+                continue
+            # 할당량 초과인 경우 → 해당 모델은 쓸 수 없으므로 다음으로
+            if "429" in err or "quota" in err.lower():
+                continue
+            # 그 외 오류 → 일단 다음으로
+            continue
+
+    return None, None
+
+
+# ============================================================
+# 3. YouTube DATA 레이어
 # ============================================================
 
 @st.cache_resource
 def _build_youtube_client():
-    """YouTube 클라이언트를 한 번만 생성합니다."""
     return build("youtube", "v3", developerKey=st.secrets["YOUTUBE_API_KEY"])
 
 
 def extract_video_id(url: str) -> str | None:
-    """다양한 형태의 유튜브 URL에서 영상 ID를 추출합니다."""
     patterns = [
-        r"(?:v=)([0-9A-Za-z_-]{11})",          # ?v=XXXXX
-        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",  # 단축 URL
-        r"(?:embed\/)([0-9A-Za-z_-]{11})",       # 임베드 URL
-        r"(?:shorts\/)([0-9A-Za-z_-]{11})",      # Shorts URL
+        r"(?:v=)([0-9A-Za-z_-]{11})",
+        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
+        r"(?:embed\/)([0-9A-Za-z_-]{11})",
+        r"(?:shorts\/)([0-9A-Za-z_-]{11})",
     ]
     for pat in patterns:
         m = re.search(pat, url)
@@ -84,12 +122,12 @@ def extract_video_id(url: str) -> str | None:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_video_info(video_id: str) -> dict | None:
-    """영상 기본 정보(제목, 조회수, 좋아요, 댓글 수)를 가져옵니다."""
     try:
         yt = _build_youtube_client()
         resp = yt.videos().list(part="snippet,statistics", id=video_id).execute()
         items = resp.get("items", [])
         if not items:
+            st.error("❌ 영상을 찾을 수 없습니다. URL을 확인하세요.")
             return None
         item = items[0]
         stats = item["statistics"]
@@ -102,69 +140,54 @@ def fetch_video_info(video_id: str) -> dict | None:
             "comment_count": int(stats.get("commentCount", 0)),
         }
     except HttpError as e:
-        if e.resp.status == 403:
-            st.error("❌ YouTube API 키가 유효하지 않거나 할당량이 초과되었습니다.")
-        elif e.resp.status == 404:
-            st.error("❌ 영상을 찾을 수 없습니다. URL을 확인하세요.")
+        code = e.resp.status
+        if code == 403:
+            st.error("❌ YouTube API 키 오류 또는 할당량 초과")
+        elif code == 404:
+            st.error("❌ 영상을 찾을 수 없습니다.")
         else:
-            st.error(f"❌ YouTube API 오류 ({e.resp.status}): {e}")
+            st.error(f"❌ YouTube API 오류 ({code}): {e}")
         return None
     except Exception as e:
-        st.error(f"❌ 예상치 못한 오류: {e}")
+        st.error(f"❌ 영상 정보 수집 오류: {e}")
         return None
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_comments(video_id: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataFrame:
-    """
-    최신 댓글을 수집하고 전처리합니다.
-    - HTML 태그 제거
-    - 너무 짧은 댓글 필터링
-    - 중복 댓글 제거
-    """
     try:
         yt = _build_youtube_client()
         resp = yt.commentThreads().list(
             part="snippet",
             videoId=video_id,
-            maxResults=min(limit * 2, 100),  # 중복/단문 필터 여유분 확보
-            order="relevance",               # 인기 댓글 우선 (대표성 높음)
+            maxResults=min(limit * 2, 100),
+            order="relevance",
         ).execute()
     except HttpError as e:
-        if e.resp.status == 403:
-            st.warning("⚠️ 이 영상은 댓글이 비활성화되어 있습니다.")
+        code = e.resp.status
+        if code == 403:
+            st.warning("⚠️ 댓글이 비활성화된 영상입니다.")
         else:
-            st.error(f"❌ 댓글 수집 오류 ({e.resp.status}): {e}")
+            st.error(f"❌ 댓글 수집 오류 ({code}): {e}")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ 댓글 수집 중 오류: {e}")
         return pd.DataFrame()
 
-    rows = []
-    seen_texts = set()
-
+    rows, seen = [], set()
     for item in resp.get("items", []):
         snip = item["snippet"]["topLevelComment"]["snippet"]
-        raw_text = snip.get("textDisplay", "")
-
-        # 전처리
-        clean = re.sub(r"<[^>]+>", "", raw_text)    # HTML 태그 제거
-        clean = re.sub(r"https?://\S+", "", clean)   # URL 제거
-        clean = clean.replace("\n", " ").strip()
-
-        # 필터: 너무 짧거나 중복 제거
-        if len(clean) < Config.COMMENT_MIN_LENGTH:
+        raw = snip.get("textDisplay", "")
+        clean = re.sub(r"<[^>]+>", "", raw)
+        clean = re.sub(r"https?://\S+", "", clean).replace("\n", " ").strip()
+        if len(clean) < Config.COMMENT_MIN_LENGTH or clean in seen:
             continue
-        if clean in seen_texts:
-            continue
-        seen_texts.add(clean)
-
+        seen.add(clean)
         rows.append({
             "time": snip["publishedAt"],
             "text": clean,
             "likes": int(snip.get("likeCount", 0)),
         })
-
         if len(rows) >= limit:
             break
 
@@ -178,165 +201,140 @@ def fetch_comments(video_id: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataF
 
 
 # ============================================================
-# 3. AI 레이어 — Gemini API
+# 4. AI 레이어 — 배치 처리 + 할당량 보호
 # ============================================================
 
-@st.cache_resource(show_spinner=False)
-def _get_gemini_model():
-    """
-    Gemini 모델을 앱 기동 시 한 번만 선택합니다 (cache_resource).
-    매 분석마다 list_models()를 호출하던 비효율을 제거합니다.
-    """
-    try:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        available = {m.name.replace("models/", "") for m in genai.list_models()}
-
-        for target in Config.GEMINI_MODEL_PRIORITY:
-            if target in available:
-                return genai.GenerativeModel(target), target
-
-        # fallback: 목록에서 flash 포함 모델 자동 탐색
-        flash_candidates = sorted(
-            [m for m in available if "flash" in m], reverse=True
-        )
-        if flash_candidates:
-            return genai.GenerativeModel(flash_candidates[0]), flash_candidates[0]
-
-    except Exception as e:
-        st.error(f"❌ Gemini 초기화 오류: {e}")
-
-    return None, None
-
-
 def _build_prompt(comment_texts: list) -> str:
-    """분석 프롬프트를 생성합니다. 감성 레이블을 명시적으로 고정합니다."""
-    labels = ", ".join(Config.SENTIMENT_LABELS)
-    sample = "\n".join([f"- {t[:120]}" for t in comment_texts])
-    return f"""당신은 한국어 SNS 여론 분석 전문가입니다. 아래 유튜브 댓글들을 분석하세요.
-
-[규칙]
-1. 감성은 반드시 {labels} 중 하나만 사용하세요. 영어나 다른 값은 절대 사용하지 마세요.
-2. 분류(주제)는 댓글 내용을 기반으로 최대 9개까지 생성하세요.
-3. 키워드는 핵심 단어 1~3개를 쉼표로 구분하세요.
-4. 내용은 댓글 원문을 30자 이내로 요약하세요.
-5. 출력은 반드시 '|' 구분자 CSV 형식만 사용하고, 헤더와 데이터 외 다른 텍스트는 절대 쓰지 마세요.
-6. 첫 줄은 반드시 정확히 이 헤더여야 합니다: 감성|분류|키워드|내용
-
-[댓글]
-{sample}"""
-
-
-def _parse_ai_response(text: str) -> pd.DataFrame:
     """
-    AI 응답을 파싱합니다.
-    - 코드블록 제거
-    - 헤더 위치 탐색 (앞뒤 여분 텍스트 제거)
-    - 컬럼명 공백 정규화
-    - 감성 값 강제 정규화 (영어 혼입 방지)
+    토큰을 최소화한 프롬프트.
+    - 댓글을 120자로 절삭
+    - 불필요한 설명 제거, 규칙만 명시
     """
-    # 코드블록 마커 제거
+    labels = "/".join(Config.SENTIMENT_LABELS)
+    lines = "\n".join([f"{i+1}. {t[:120]}" for i, t in enumerate(comment_texts)])
+    return (
+        f"다음 댓글을 분석해 CSV로 출력하세요.\n"
+        f"헤더: 감성|분류|키워드|내용\n"
+        f"규칙: 감성={labels} 중 하나만. 다른 언어 금지. 설명 없이 CSV만 출력.\n\n"
+        f"{lines}"
+    )
+
+
+def _parse_response(text: str) -> pd.DataFrame:
     text = re.sub(r"```[a-z]*", "", text).replace("```", "").strip()
-
-    # 헤더 탐색 (공백 무관)
-    header_match = re.search(r"감성\s*\|\s*분류", text)
-    if not header_match:
+    match = re.search(r"감성\s*\|\s*분류", text)
+    if not match:
         return pd.DataFrame()
-
-    csv_text = text[header_match.start():]
-
     try:
         df = pd.read_csv(
-            io.StringIO(csv_text),
-            sep="|",
-            on_bad_lines="skip",
-            engine="python",
-            dtype=str,
+            io.StringIO(text[match.start():]),
+            sep="|", on_bad_lines="skip",
+            engine="python", dtype=str,
         )
     except Exception:
         return pd.DataFrame()
 
-    # 컬럼명 공백 정규화
     df.columns = [c.strip() for c in df.columns]
-
-    required_cols = {"감성", "분류", "키워드", "내용"}
-    if not required_cols.issubset(df.columns):
+    required = {"감성", "분류", "키워드", "내용"}
+    if not required.issubset(df.columns):
         return pd.DataFrame()
 
-    df = df[list(required_cols)].copy()
-    df = df.dropna(subset=["감성", "분류"])
-
-    # 감성 값 정규화: 영어나 예상 외 값은 '중립'으로 교정
-    valid = set(Config.SENTIMENT_LABELS)
+    df = df[list(required)].copy().dropna(subset=["감성", "분류"])
     df["감성"] = df["감성"].str.strip()
+    valid = set(Config.SENTIMENT_LABELS)
     df.loc[~df["감성"].isin(valid), "감성"] = "중립"
-
-    # 빈 내용 행 제거
     df = df[df["내용"].str.strip().str.len() > 0]
-
     return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def analyze_comments(comment_hash: str, comment_texts: list) -> pd.DataFrame:
+def _call_gemini_with_retry(model, prompt: str) -> str | None:
     """
-    댓글을 AI로 분석합니다.
-    - comment_hash: 동일 댓글 재분석 방지용 캐시 키 (실제 사용 인자)
-    - 429 오류 시 지수 대기 재시도
+    단일 Gemini 호출 + 429 재시도.
+    성공 시 응답 텍스트, 실패 시 None 반환.
     """
-    model, model_name = _get_gemini_model()
-    if model is None:
-        st.error("❌ 사용 가능한 Gemini 모델이 없습니다.")
-        return pd.DataFrame()
-
-    prompt = _build_prompt(comment_texts)
-
     for attempt in range(Config.MAX_RETRIES):
         try:
-            response = model.generate_content(prompt)
-            result = _parse_ai_response(response.text)
-
-            if not result.empty:
-                return result
-
-            st.warning(f"⚠️ AI 응답 파싱 실패 (시도 {attempt + 1}/{Config.MAX_RETRIES}). 재시도 중...")
-
+            resp = model.generate_content(prompt)
+            return resp.text
         except Exception as e:
             err = str(e)
-            is_quota_error = any(k in err for k in [
-                "429", "quota", "Resource has been exhausted", "RESOURCE_EXHAUSTED"
+            is_quota = any(k in err for k in [
+                "429", "quota", "RESOURCE_EXHAUSTED", "Resource has been exhausted"
             ])
-
-            if is_quota_error:
+            if is_quota:
                 wait = Config.RETRY_BASE_WAIT * (attempt + 1)
                 st.warning(
-                    f"⚠️ Gemini API 할당량 초과. {wait}초 후 재시도합니다. "
-                    f"({attempt + 1}/{Config.MAX_RETRIES})\n"
-                    f"👉 사용량 확인: https://aistudio.google.com/"
+                    f"⚠️ Gemini 할당량 초과 — {wait}초 대기 후 재시도 "
+                    f"({attempt + 1}/{Config.MAX_RETRIES})"
                 )
                 time.sleep(wait)
             else:
-                st.error(f"❌ AI 분석 오류: {e}")
-                return pd.DataFrame()
+                st.error(f"❌ Gemini 호출 오류: {e}")
+                return None
+    return None
 
-    st.error(
-        "❌ 분석에 최종 실패했습니다. 가능한 원인:\n"
-        "- Gemini 무료 할당량 소진 (잠시 후 재시도)\n"
-        "- API 키 오류 (Secrets 설정 확인)\n"
-        "- 네트워크 문제"
-    )
-    return pd.DataFrame()
+
+@st.cache_data(ttl=86400, show_spinner=False)  # 24시간 캐싱
+def analyze_comments(comment_hash: str, comment_texts: list) -> pd.DataFrame:
+    """
+    댓글을 BATCH_SIZE 단위로 나눠 분석합니다.
+    - 한 번에 보내는 토큰 수를 줄여 RPM·TPM 한도 보호
+    - 배치 간 1초 대기로 분당 요청 수 조절
+    - 24시간 캐싱으로 동일 영상 재분석 방지
+    comment_hash는 캐시 키 역할만 하며 내부에서 직접 사용하지 않습니다.
+    """
+    model, model_name = _get_gemini_model()
+    if model is None:
+        st.error(
+            "❌ 사용 가능한 Gemini 모델이 없습니다.\n"
+            "가능한 원인:\n"
+            "- 모든 Flash 모델의 무료 할당량 소진\n"
+            "- GEMINI_API_KEY가 잘못됨\n"
+            "👉 https://aistudio.google.com/ 에서 사용량 확인"
+        )
+        return pd.DataFrame()
+
+    st.caption(f"🤖 사용 모델: `{model_name}`")
+
+    batches = [
+        comment_texts[i: i + Config.BATCH_SIZE]
+        for i in range(0, len(comment_texts), Config.BATCH_SIZE)
+    ]
+
+    all_results = []
+    for idx, batch in enumerate(batches):
+        # 배치 진행 상황 표시
+        st.caption(f"  📦 배치 {idx + 1}/{len(batches)} 분석 중... ({len(batch)}개 댓글)")
+
+        prompt = _build_prompt(batch)
+        raw_text = _call_gemini_with_retry(model, prompt)
+
+        if raw_text is None:
+            st.warning(f"⚠️ 배치 {idx + 1} 분석 실패, 건너뜀")
+            continue
+
+        parsed = _parse_response(raw_text)
+        if not parsed.empty:
+            all_results.append(parsed)
+
+        # 배치 간 1초 대기: 분당 요청 수(RPM) 보호
+        if idx < len(batches) - 1:
+            time.sleep(1)
+
+    if not all_results:
+        st.error(
+            "❌ 모든 배치 분석에 실패했습니다.\n"
+            "- 무료 할당량 소진 시 1분 후 재시도하세요.\n"
+            "- 유료 API 키 사용 시 할당량이 크게 늘어납니다."
+        )
+        return pd.DataFrame()
+
+    return pd.concat(all_results, ignore_index=True)
 
 
 # ============================================================
-# 4. UI 레이어
+# 5. UI 레이어
 # ============================================================
-
-def render_header():
-    st.title("📊 유튜브 실시간 여론 분석")
-    st.caption(
-        "YouTube 댓글을 수집하고 Gemini Flash 모델로 감성 · 주제 분석을 수행합니다."
-    )
-
 
 def render_metrics(info: dict, analyzed_count: int):
     cols = st.columns(5)
@@ -352,92 +350,65 @@ def render_charts(raw_df: pd.DataFrame, result_df: pd.DataFrame):
 
     with col1:
         st.subheader("📈 시간대별 댓글 추이")
-        if not raw_df.empty:
-            trend = (
-                raw_df.set_index("time")
-                .resample("H")
-                .size()
-                .reset_index(name="댓글 수")
-            )
-            fig = px.line(
-                trend, x="time", y="댓글 수",
-                markers=True,
-                labels={"time": "시간"},
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("댓글 데이터가 없습니다.")
+        trend = (
+            raw_df.set_index("time").resample("H")
+            .size().reset_index(name="댓글 수")
+        )
+        st.plotly_chart(
+            px.line(trend, x="time", y="댓글 수", markers=True,
+                    labels={"time": "시간"}),
+            use_container_width=True,
+        )
 
     with col2:
         st.subheader("😊 감성 분석 비율")
         s_counts = (
-            result_df["감성"]
-            .value_counts()
-            .rename_axis("감성")
-            .reset_index(name="count")
+            result_df["감성"].value_counts()
+            .rename_axis("감성").reset_index(name="count")
         )
-        fig = px.pie(
-            s_counts,
-            names="감성",
-            values="count",
-            color="감성",
-            color_discrete_map=Config.SENTIMENT_COLORS,
-            hole=0.35,
+        st.plotly_chart(
+            px.pie(s_counts, names="감성", values="count",
+                   color="감성", color_discrete_map=Config.SENTIMENT_COLORS,
+                   hole=0.35),
+            use_container_width=True,
         )
-        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_topic_chart(result_df: pd.DataFrame):
     st.subheader("📁 주제별 여론 분석")
-    b_data = (
-        result_df.groupby(["분류", "감성"])
-        .size()
-        .reset_index(name="댓글 수")
-    )
-    # 주제를 총 댓글 수 기준으로 내림차순 정렬
+    b_data = result_df.groupby(["분류", "감성"]).size().reset_index(name="댓글 수")
     order = (
         b_data.groupby("분류")["댓글 수"]
-        .sum()
-        .sort_values(ascending=True)
-        .index.tolist()
+        .sum().sort_values(ascending=True).index.tolist()
     )
-    fig = px.bar(
-        b_data,
-        x="댓글 수",
-        y="분류",
-        color="감성",
-        orientation="h",
-        color_discrete_map=Config.SENTIMENT_COLORS,
-        category_orders={"분류": order},
+    st.plotly_chart(
+        px.bar(b_data, x="댓글 수", y="분류", color="감성", orientation="h",
+               color_discrete_map=Config.SENTIMENT_COLORS,
+               category_orders={"분류": order}),
+        use_container_width=True,
     )
-    fig.update_layout(legend_title_text="감성")
-    st.plotly_chart(fig, use_container_width=True)
 
 
 def render_data_table(result_df: pd.DataFrame, video_id: str):
     st.subheader("📋 분석 데이터")
-
-    # 감성 필터 UI
-    sentiments = ["전체"] + Config.SENTIMENT_LABELS
-    selected = st.selectbox("감성 필터", sentiments)
+    selected = st.selectbox("감성 필터", ["전체"] + Config.SENTIMENT_LABELS)
     filtered = result_df if selected == "전체" else result_df[result_df["감성"] == selected]
-
     st.dataframe(filtered, use_container_width=True, height=400)
-
     st.download_button(
-        label="⬇️ CSV 다운로드",
-        data=filtered.to_csv(index=False).encode("utf-8-sig"),
+        "⬇️ CSV 다운로드",
+        filtered.to_csv(index=False).encode("utf-8-sig"),
         file_name=f"analysis_{video_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
     )
 
 
 # ============================================================
-# 5. 메인 실행
+# 6. 메인
 # ============================================================
 
 def main():
-    render_header()
+    st.title("📊 유튜브 실시간 여론 분석")
+    st.caption("YouTube 댓글을 수집하고 Gemini Flash 모델로 감성 · 주제 분석을 수행합니다.")
 
     url = st.text_input(
         "유튜브 URL을 입력하세요",
@@ -448,19 +419,14 @@ def main():
         st.info("📌 분석할 유튜브 영상 URL을 입력하면 자동으로 분석을 시작합니다.")
         return
 
-    # URL 유효성 검사
     video_id = extract_video_id(url)
     if not video_id:
         st.error(
-            "❌ 유효하지 않은 유튜브 URL입니다.\n\n"
-            "지원 형식:\n"
-            "- https://www.youtube.com/watch?v=XXXXXXXXXXX\n"
-            "- https://youtu.be/XXXXXXXXXXX\n"
-            "- https://www.youtube.com/shorts/XXXXXXXXXXX"
+            "❌ 유효하지 않은 유튜브 URL입니다.\n"
+            "지원 형식: watch?v=... / youtu.be/... / shorts/..."
         )
         return
 
-    # 분석 실행
     with st.status("분석 중...", expanded=True) as status:
         st.write("📡 영상 정보 수집 중...")
         info = fetch_video_info(video_id)
@@ -471,15 +437,13 @@ def main():
         st.write(f"✅ 영상: **{info['title']}**")
         st.write("💬 댓글 수집 중...")
         raw_df = fetch_comments(video_id)
-
         if raw_df.empty:
             status.update(label="❌ 댓글 수집 실패", state="error")
             return
 
         st.write(f"✅ {len(raw_df)}개 댓글 수집 완료")
-        st.write("🤖 AI 분석 중...")
+        st.write("🤖 AI 분석 중 (배치 처리)...")
 
-        # 동일 댓글 세트 재분석 방지: 댓글 내용으로 해시 생성
         comment_hash = hashlib.md5(
             "".join(raw_df["text"].tolist()).encode()
         ).hexdigest()
@@ -491,7 +455,6 @@ def main():
 
         status.update(label="✅ 분석 완료!", state="complete", expanded=False)
 
-    # 결과 렌더링
     st.divider()
     st.subheader(f"🎬 {info['title']}")
     st.caption(f"채널: {info['channel']}  |  게시일: {info['published']}")

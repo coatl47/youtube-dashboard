@@ -60,10 +60,11 @@ class Config:
 
 
 # ============================================================
-# 2. Gemini 초기화 (모듈 레벨 1회 실행)
+# 2. Gemini 초기화
 # ============================================================
-# genai.configure()를 함수 안에서 반복 호출하면
-# 세션마다 인증 오버헤드가 발생하므로 최상위에서 1회만 실행합니다.
+# genai.configure()는 모듈 레벨에서 1회만 실행합니다.
+# GenerativeModel 인스턴스화는 API 호출이 없으므로 할당량을 소비하지 않습니다.
+# ping 테스트 호출은 완전히 제거합니다 — 모델 유효성은 실제 분석 시 검증합니다.
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception as _cfg_err:
@@ -71,30 +72,19 @@ except Exception as _cfg_err:
 
 
 @st.cache_resource(show_spinner=False)
-def _get_gemini_model():
+def _build_gemini_models() -> list:
     """
-    list_models() API를 호출하지 않고,
-    우선순위 모델을 순서대로 직접 인스턴스화해 동작하는 모델을 반환합니다.
-    캐싱(cache_resource)으로 앱 기동 후 1회만 실행됩니다.
+    API 호출 없이 모델 인스턴스만 생성해 우선순위 리스트로 반환합니다.
+    GenerativeModel() 생성자는 네트워크 요청을 하지 않으므로 할당량 소비 없음.
+    실제 할당량 소비는 generate_content() 호출 시에만 발생합니다.
     """
-    for model_name in Config.GEMINI_MODEL_PRIORITY:
+    models = []
+    for name in Config.GEMINI_MODEL_PRIORITY:
         try:
-            model = genai.GenerativeModel(model_name)
-            # 빈 프롬프트로 실제 연결 가능 여부를 확인합니다
-            model.generate_content("ping", generation_config={"max_output_tokens": 1})
-            return model, model_name
-        except Exception as e:
-            err = str(e)
-            # 모델이 존재하지 않는 경우 → 다음 후보로 넘어감
-            if "not found" in err.lower() or "404" in err:
-                continue
-            # 할당량 초과인 경우 → 해당 모델은 쓸 수 없으므로 다음으로
-            if "429" in err or "quota" in err.lower():
-                continue
-            # 그 외 오류 → 일단 다음으로
-            continue
-
-    return None, None
+            models.append((genai.GenerativeModel(name), name))
+        except Exception:
+            pass
+    return models
 
 
 # ============================================================
@@ -247,55 +237,67 @@ def _parse_response(text: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def _call_gemini_with_retry(model, prompt: str) -> str | None:
+def _is_quota_error(err: str) -> bool:
+    return any(k in err for k in [
+        "429", "quota", "RESOURCE_EXHAUSTED", "Resource has been exhausted",
+        "rate limit", "RateLimitError",
+    ])
+
+
+def _is_model_not_found(err: str) -> bool:
+    return any(k in err.lower() for k in ["not found", "404", "does not exist"])
+
+
+def _call_with_model_fallback(prompt: str) -> tuple[str | None, str | None]:
     """
-    단일 Gemini 호출 + 429 재시도.
-    성공 시 응답 텍스트, 실패 시 None 반환.
+    모델 우선순위 리스트를 순회하며 호출합니다.
+    - 429 할당량 초과 → 즉시 다음 모델로 전환 (대기 없음)
+    - 404 모델 없음  → 즉시 다음 모델로 전환
+    - 그 외 오류    → MAX_RETRIES 재시도 후 다음 모델로 전환
+    모든 모델 실패 시 (None, None) 반환.
     """
-    for attempt in range(Config.MAX_RETRIES):
-        try:
-            resp = model.generate_content(prompt)
-            return resp.text
-        except Exception as e:
-            err = str(e)
-            is_quota = any(k in err for k in [
-                "429", "quota", "RESOURCE_EXHAUSTED", "Resource has been exhausted"
-            ])
-            if is_quota:
+    model_list = _build_gemini_models()
+    if not model_list:
+        return None, None
+
+    for model, model_name in model_list:
+        for attempt in range(Config.MAX_RETRIES):
+            try:
+                resp = model.generate_content(prompt)
+                return resp.text, model_name
+
+            except Exception as e:
+                err = str(e)
+
+                if _is_quota_error(err):
+                    # 이 모델은 할당량 소진 → 다음 모델로 즉시 전환
+                    st.caption(f"  ⚠️ `{model_name}` 할당량 초과 → 다음 모델로 전환")
+                    break  # inner loop 탈출 → 다음 model로
+
+                if _is_model_not_found(err):
+                    # 존재하지 않는 모델 → 다음 모델로 즉시 전환
+                    break
+
+                # 그 외 일시적 오류 → 잠시 대기 후 같은 모델 재시도
                 wait = Config.RETRY_BASE_WAIT * (attempt + 1)
-                st.warning(
-                    f"⚠️ Gemini 할당량 초과 — {wait}초 대기 후 재시도 "
-                    f"({attempt + 1}/{Config.MAX_RETRIES})"
+                st.caption(
+                    f"  ⏳ `{model_name}` 오류, {wait}초 후 재시도 "
+                    f"({attempt + 1}/{Config.MAX_RETRIES}): {err[:80]}"
                 )
                 time.sleep(wait)
-            else:
-                st.error(f"❌ Gemini 호출 오류: {e}")
-                return None
-    return None
+
+    return None, None
 
 
 @st.cache_data(ttl=86400, show_spinner=False)  # 24시간 캐싱
 def analyze_comments(comment_hash: str, comment_texts: list) -> pd.DataFrame:
     """
     댓글을 BATCH_SIZE 단위로 나눠 분석합니다.
-    - 한 번에 보내는 토큰 수를 줄여 RPM·TPM 한도 보호
-    - 배치 간 1초 대기로 분당 요청 수 조절
+    - 배치마다 _call_with_model_fallback() 사용
+      → 429 발생 시 대기 없이 즉시 다음 모델로 자동 전환
     - 24시간 캐싱으로 동일 영상 재분석 방지
-    comment_hash는 캐시 키 역할만 하며 내부에서 직접 사용하지 않습니다.
+    comment_hash는 캐시 키 역할만 합니다.
     """
-    model, model_name = _get_gemini_model()
-    if model is None:
-        st.error(
-            "❌ 사용 가능한 Gemini 모델이 없습니다.\n"
-            "가능한 원인:\n"
-            "- 모든 Flash 모델의 무료 할당량 소진\n"
-            "- GEMINI_API_KEY가 잘못됨\n"
-            "👉 https://aistudio.google.com/ 에서 사용량 확인"
-        )
-        return pd.DataFrame()
-
-    st.caption(f"🤖 사용 모델: `{model_name}`")
-
     batches = [
         comment_texts[i: i + Config.BATCH_SIZE]
         for i in range(0, len(comment_texts), Config.BATCH_SIZE)
@@ -303,29 +305,30 @@ def analyze_comments(comment_hash: str, comment_texts: list) -> pd.DataFrame:
 
     all_results = []
     for idx, batch in enumerate(batches):
-        # 배치 진행 상황 표시
         st.caption(f"  📦 배치 {idx + 1}/{len(batches)} 분석 중... ({len(batch)}개 댓글)")
 
         prompt = _build_prompt(batch)
-        raw_text = _call_gemini_with_retry(model, prompt)
+        raw_text, used_model = _call_with_model_fallback(prompt)
 
         if raw_text is None:
-            st.warning(f"⚠️ 배치 {idx + 1} 분석 실패, 건너뜀")
+            st.warning(f"⚠️ 배치 {idx + 1}: 모든 모델 실패, 건너뜀")
             continue
 
+        st.caption(f"  ✅ 배치 {idx + 1} 완료 (모델: `{used_model}`)")
         parsed = _parse_response(raw_text)
         if not parsed.empty:
             all_results.append(parsed)
 
-        # 배치 간 1초 대기: 분당 요청 수(RPM) 보호
+        # 배치 간 1초 대기로 RPM 보호
         if idx < len(batches) - 1:
             time.sleep(1)
 
     if not all_results:
         st.error(
-            "❌ 모든 배치 분석에 실패했습니다.\n"
-            "- 무료 할당량 소진 시 1분 후 재시도하세요.\n"
-            "- 유료 API 키 사용 시 할당량이 크게 늘어납니다."
+            "❌ 모든 배치/모델 분석에 실패했습니다.\n"
+            "- 무료 Flash 모델 3종 모두 할당량 소진\n"
+            "- 1분 후 재시도하거나, 유료 API 키로 전환하세요.\n"
+            "👉 https://aistudio.google.com/ 에서 사용량 확인"
         )
         return pd.DataFrame()
 

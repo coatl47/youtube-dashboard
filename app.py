@@ -51,6 +51,16 @@ footer { display: none; }
     max-width: 900px !important;
 }
 
+/* ── st.container(border=True) → 흰 카드 ── */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: #ffffff !important;
+    border-radius: 10px !important;
+    border: 1px solid #e8eaed !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.07) !important;
+    padding: 0.2rem 0.4rem !important;
+    margin-bottom: 1rem !important;
+}
+
 /* ── 카드 공통 ── */
 .card {
     background: #ffffff;
@@ -435,31 +445,71 @@ def make_trend(raw_df):
 def make_view_trend(vid):
     df = fetch_view_history(vid)
     if df.empty: return None
+
+    # 영상 기간에 따라 x축 단위 자동 조정
+    span_days = (df["date"].iloc[-1] - df["date"].iloc[0]).days
+    if span_days <= 3:
+        tick_fmt  = "%m/%d %H시"
+        hover_fmt = "%{x|%m/%d %H:%M}: %{y:,}회"
+    elif span_days <= 30:
+        tick_fmt  = "%m/%d"
+        hover_fmt = "%{x|%m/%d %H시}: %{y:,}회"
+    else:
+        tick_fmt  = "%y/%m/%d"
+        hover_fmt = "%{x|%Y-%m-%d}: %{y:,}회"
+
     fig = go.Figure(go.Scatter(
         x=df["date"], y=df["views"],
         mode="lines", line=dict(color="#5b9bd5", width=2),
         fill="tozeroy", fillcolor="rgba(91,155,213,0.08)",
-        hovertemplate="%{x|%Y-%m-%d}: %{y:,}회<extra></extra>",
+        hovertemplate=hover_fmt + "<extra></extra>",
     ))
     fig.update_layout(**CHART_LAYOUT, height=260,
                       xaxis=dict(showgrid=False, zeroline=False,
-                                 tickformat="%b %d\n%Y"),
+                                 tickformat=tick_fmt,
+                                 tickangle=-30),
                       yaxis=dict(showgrid=True, gridcolor="#f0f0f0",
                                  zeroline=False, tickformat=","))
     return fig
 
+def _merge_small_topics(res_df: pd.DataFrame, max_topics: int = 8) -> pd.DataFrame:
+    """
+    댓글 수 기준 상위 max_topics-1개 분류는 유지,
+    나머지는 '기타'로 묶어 전체 분류 수를 max_topics 이하로 제한합니다.
+    """
+    topic_counts = res_df["분류"].value_counts()
+    if len(topic_counts) <= max_topics:
+        return res_df.copy()
+
+    top_topics  = topic_counts.iloc[:max_topics - 1].index.tolist()
+    df2         = res_df.copy()
+    df2["분류"] = df2["분류"].apply(lambda x: x if x in top_topics else "기타")
+    return df2
+
+
 def make_topic_bar(res_df):
-    bd    = res_df.groupby(["분류","감성"]).size().reset_index(name="n")
+    df    = _merge_small_topics(res_df, max_topics=8)
+    bd    = df.groupby(["분류","감성"]).size().reset_index(name="n")
     order = bd.groupby("분류")["n"].sum().sort_values(ascending=True).index.tolist()
-    fig   = px.bar(bd, x="n", y="분류", color="감성", orientation="h",
-                   color_discrete_map=Config.SENTIMENT_COLORS,
-                   category_orders={"분류": order},
-                   labels={"n":"","분류":""},
-                   height=max(220, len(order)*52))
+
+    # 스크린샷과 동일한 색상 순서 보장 (긍정=초록, 부정=빨강, 중립=파랑)
+    fig = px.bar(
+        bd, x="n", y="분류", color="감성", orientation="h",
+        color_discrete_map=Config.SENTIMENT_COLORS,
+        category_orders={
+            "분류":   order,
+            "감성":   ["중립", "부정", "긍정"],   # 스택 순서
+        },
+        labels={"n": "", "분류": ""},
+        height=max(260, len(order) * 52),
+    )
     fig.update_layout(
         **CHART_LAYOUT,
-        legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center",
-                    font=dict(size=11)),
+        legend=dict(
+            orientation="h", y=-0.15, x=0.5, xanchor="center",
+            font=dict(size=11),
+            traceorder="reversed",          # 긍정→부정→중립 순 범례
+        ),
         xaxis=dict(showgrid=True, gridcolor="#f0f0f0", zeroline=False),
         yaxis=dict(showgrid=False),
         bargap=0.35,
@@ -560,28 +610,29 @@ def main():
     # ════════════════════════════════════════════════════════
     vt_fig = make_view_trend(video_id)
     if vt_fig:
-        st.markdown('<div class="card"><div class="card-title">📈 시간대별 누적 조회수 추이</div>',
-                    unsafe_allow_html=True)
-        st.plotly_chart(vt_fig, use_container_width=True, config={"displayModeBar": False})
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown('<div class="card-title">📈 시간대별 누적 조회수 추이</div>',
+                        unsafe_allow_html=True)
+            st.plotly_chart(vt_fig, use_container_width=True,
+                            config={"displayModeBar": False})
 
     # ════════════════════════════════════════════════════════
     # 전체 감성 분포
     # ════════════════════════════════════════════════════════
-    st.markdown('<div class="card"><div class="card-title">😊 전체 감성 분포</div>',
-                unsafe_allow_html=True)
-    st.plotly_chart(make_donut(res_df), use_container_width=True,
-                    config={"displayModeBar": False})
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown('<div class="card-title">😊 전체 감성 분포</div>',
+                    unsafe_allow_html=True)
+        st.plotly_chart(make_donut(res_df), use_container_width=True,
+                        config={"displayModeBar": False})
 
     # ════════════════════════════════════════════════════════
     # 분류별 여론
     # ════════════════════════════════════════════════════════
-    st.markdown('<div class="card"><div class="card-title">📊 분류별 여론 (긍정/부정/중립)</div>',
-                unsafe_allow_html=True)
-    st.plotly_chart(make_topic_bar(res_df), use_container_width=True,
-                    config={"displayModeBar": False})
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown('<div class="card-title">📊 분류별 여론 (긍정/부정/중립)</div>',
+                    unsafe_allow_html=True)
+        st.plotly_chart(make_topic_bar(res_df), use_container_width=True,
+                        config={"displayModeBar": False})
 
     # ════════════════════════════════════════════════════════
     # 전체 분석 데이터 테이블

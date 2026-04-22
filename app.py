@@ -246,88 +246,115 @@ def _is_model_not_found(err: str) -> bool:
     return any(k in err.lower() for k in ["not found", "404", "does not exist"])
 
 
-def _call_with_model_fallback(prompt: str) -> tuple[str | None, str | None]:
+def _call_with_model_fallback(prompt: str) -> tuple[str | None, str | None, str | None]:
     """
     모델 우선순위 리스트를 순회하며 호출합니다.
-    - 429 할당량 초과 → 즉시 다음 모델로 전환 (대기 없음)
-    - 404 모델 없음  → 즉시 다음 모델로 전환
-    - 그 외 오류    → MAX_RETRIES 재시도 후 다음 모델로 전환
-    모든 모델 실패 시 (None, None) 반환.
+    반환: (응답텍스트 or None, 모델명 or None, 마지막오류 or None)
+
+    ※ st.* 호출 없음 — cache_data 내부에서 호출되므로
+      오류 정보를 반환값으로 전달해 호출부에서 표시합니다.
     """
     model_list = _build_gemini_models()
     if not model_list:
-        return None, None
+        return None, None, "GenerativeModel 인스턴스 생성 실패 — API 키를 확인하세요."
 
+    last_error = ""
     for model, model_name in model_list:
         for attempt in range(Config.MAX_RETRIES):
             try:
                 resp = model.generate_content(prompt)
-                return resp.text, model_name
+                return resp.text, model_name, None   # ✅ 성공
 
             except Exception as e:
                 err = str(e)
+                last_error = f"[{model_name}] {err}"
 
                 if _is_quota_error(err):
-                    # 이 모델은 할당량 소진 → 다음 모델로 즉시 전환
-                    st.caption(f"  ⚠️ `{model_name}` 할당량 초과 → 다음 모델로 전환")
-                    break  # inner loop 탈출 → 다음 model로
+                    last_error = f"[{model_name}] 할당량 초과(429): {err}"
+                    break   # 다음 모델로
 
                 if _is_model_not_found(err):
-                    # 존재하지 않는 모델 → 다음 모델로 즉시 전환
-                    break
+                    last_error = f"[{model_name}] 모델 없음(404): {err}"
+                    break   # 다음 모델로
 
-                # 그 외 일시적 오류 → 잠시 대기 후 같은 모델 재시도
+                # 그 외: 재시도
                 wait = Config.RETRY_BASE_WAIT * (attempt + 1)
-                st.caption(
-                    f"  ⏳ `{model_name}` 오류, {wait}초 후 재시도 "
-                    f"({attempt + 1}/{Config.MAX_RETRIES}): {err[:80]}"
-                )
                 time.sleep(wait)
 
-    return None, None
+    return None, None, last_error
 
 
-@st.cache_data(ttl=86400, show_spinner=False)  # 24시간 캐싱
-def analyze_comments(comment_hash: str, comment_texts: list) -> pd.DataFrame:
+@st.cache_data(ttl=86400, show_spinner=False)
+def _analyze_batch_cached(comment_hash: str, comment_texts: list) -> tuple[list, list]:
     """
-    댓글을 BATCH_SIZE 단위로 나눠 분석합니다.
-    - 배치마다 _call_with_model_fallback() 사용
-      → 429 발생 시 대기 없이 즉시 다음 모델로 자동 전환
-    - 24시간 캐싱으로 동일 영상 재분석 방지
-    comment_hash는 캐시 키 역할만 합니다.
+    ※ cache_data 함수 안에서는 st.* 절대 호출 금지.
+    반환: (성공한 CSV 텍스트 리스트, 오류 메시지 리스트)
     """
     batches = [
         comment_texts[i: i + Config.BATCH_SIZE]
         for i in range(0, len(comment_texts), Config.BATCH_SIZE)
     ]
 
-    all_results = []
-    for idx, batch in enumerate(batches):
-        st.caption(f"  📦 배치 {idx + 1}/{len(batches)} 분석 중... ({len(batch)}개 댓글)")
+    raw_results = []
+    errors = []
 
+    for idx, batch in enumerate(batches):
         prompt = _build_prompt(batch)
-        raw_text, used_model = _call_with_model_fallback(prompt)
+        raw_text, used_model, err_msg = _call_with_model_fallback(prompt)
 
         if raw_text is None:
-            st.warning(f"⚠️ 배치 {idx + 1}: 모든 모델 실패, 건너뜀")
-            continue
+            errors.append(f"배치 {idx + 1}: {err_msg}")
+        else:
+            raw_results.append((raw_text, used_model))
+            time.sleep(1)   # RPM 보호
 
-        st.caption(f"  ✅ 배치 {idx + 1} 완료 (모델: `{used_model}`)")
+    return raw_results, errors
+
+
+def analyze_comments(comment_hash: str, comment_texts: list) -> pd.DataFrame:
+    """
+    UI 출력(st.*)은 여기서 담당하고,
+    실제 API 호출은 캐싱된 _analyze_batch_cached()에 위임합니다.
+    """
+    total_batches = (len(comment_texts) + Config.BATCH_SIZE - 1) // Config.BATCH_SIZE
+    st.caption(f"🤖 총 {total_batches}개 배치로 분석합니다...")
+
+    raw_results, errors = _analyze_batch_cached(comment_hash, comment_texts)
+
+    # 오류가 있었으면 실제 오류 메시지를 화면에 표시
+    if errors:
+        with st.expander("⚠️ 일부 배치 오류 상세 (클릭해서 확인)", expanded=True):
+            for e in errors:
+                st.code(e)
+
+            # 원인 분류해서 해결책 안내
+            all_err_text = " ".join(errors)
+            if _is_quota_error(all_err_text):
+                st.warning(
+                    "**원인: 할당량 초과**\n\n"
+                    "유료 키인데도 발생한다면:\n"
+                    "1. [aistudio.google.com/apikey](https://aistudio.google.com/apikey) 접속\n"
+                    "2. 사용 중인 키 옆 **Plan** 컬럼이 `Paid`인지 확인\n"
+                    "3. `Free`이면 → 결제 연결된 프로젝트에서 키를 새로 발급\n"
+                    "4. Streamlit Cloud Secrets 값 교체 후 앱 **Reboot**"
+                )
+            elif "API_KEY_INVALID" in all_err_text or "401" in all_err_text:
+                st.error(
+                    "**원인: API 키 인증 실패**\n\n"
+                    "secrets.toml 의 GEMINI_API_KEY 값이 잘못됐습니다.\n"
+                    "AI Studio에서 키를 복사해 Streamlit Secrets에 다시 붙여넣고 Reboot 하세요."
+                )
+            elif "404" in all_err_text or "not found" in all_err_text.lower():
+                st.error("**원인: 모델을 찾을 수 없음** — 모델명 또는 지역 문제")
+
+    all_results = []
+    for raw_text, used_model in raw_results:
+        st.caption(f"  ✅ 완료 (모델: `{used_model}`)")
         parsed = _parse_response(raw_text)
         if not parsed.empty:
             all_results.append(parsed)
 
-        # 배치 간 1초 대기로 RPM 보호
-        if idx < len(batches) - 1:
-            time.sleep(1)
-
     if not all_results:
-        st.error(
-            "❌ 모든 배치/모델 분석에 실패했습니다.\n"
-            "- 무료 Flash 모델 3종 모두 할당량 소진\n"
-            "- 1분 후 재시도하거나, 유료 API 키로 전환하세요.\n"
-            "👉 https://aistudio.google.com/ 에서 사용량 확인"
-        )
         return pd.DataFrame()
 
     return pd.concat(all_results, ignore_index=True)

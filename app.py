@@ -14,15 +14,31 @@ GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# analyze_ai 함수 내부의 모델 선택 로직 수정
 def get_best_model():
-    # Pro 대신 Flash 모델을 1순위로 호출 (무료 할당량이 더 많음)
-    for target in ['models/gemini-3-flash', 'models/gemini-1.5-flash']:
-        if target in [m.name for m in genai.list_models()]:
-            return genai.GenerativeModel(target)
+    """
+    결제 한도 문제를 피하기 위해 무료 할당량이 많은 
+    Flash 모델을 최우선적으로 선택합니다.
+    """
+    try:
+        # 사용 가능한 모델 리스트 가져오기
+        available_models = [m.name for m in genai.list_models()]
+        
+        # Flash 모델 우선순위 리스트 (최신 모델부터)
+        # 3-flash가 목록에 있다면 가장 먼저 선택, 없으면 1.5-flash 선택
+        targets = ['models/gemini-3-flash', 'models/gemini-1.5-flash']
+        
+        for target in targets:
+            if target in available_models:
+                return genai.GenerativeModel(target)
+        
+        # 예외 상황: 타겟 모델이 없을 경우 리스트 중 첫 번째 모델 선택
+        if available_models:
+            return genai.GenerativeModel(available_models[0])
+    except Exception as e:
+        st.error(f"모델 목록 확인 중 오류: {e}")
     return None
 
-# 2. 데이터 수집 함수 (기존 로직 유지)
+# 2. 데이터 수집 함수
 @st.cache_data(ttl=600)
 def get_stats(v_id):
     try:
@@ -52,7 +68,6 @@ def get_comms(v_id, limit=50):
 def analyze_ai(df):
     if df.empty: return pd.DataFrame()
     
-    # 자동으로 모델 선택
     model = get_best_model()
     if not model:
         st.error("사용 가능한 Gemini 모델을 찾을 수 없습니다.")
@@ -70,6 +85,7 @@ def analyze_ai(df):
     {raw_txt}
     """
     try:
+        # Flash 모델은 속도가 빠르므로 즉시 응답을 생성합니다.
         response = model.generate_content(prompt)
         res_txt = response.text.strip()
         
@@ -81,27 +97,28 @@ def analyze_ai(df):
             return rdf
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"AI 분석 중 오류: {e}")
+        st.error(f"AI 분석 중 오류(429 발생 시 한도 확인 필요): {e}")
         return pd.DataFrame()
 
 # 4. UI 구성
-st.set_page_config(page_title="유튜브 분석 대시보드", layout="wide")
-st.title("📊 유튜브 실시간 여론 분석 (자동 모델 매칭)")
+st.set_page_config(page_title="유튜브 여론 분석 대시보드", layout="wide")
+st.title("📊 유튜브 실시간 여론 분석 (Flash 모델 최적화)")
+st.info("💡 Pro 모델 대신 할당량이 넉넉한 Flash 모델을 사용하여 한도 초과 문제를 방지합니다.")
 
-url = st.text_input("유튜브 URL을 입력하세요")
+url = st.text_input("분석할 유튜브 URL을 입력하세요")
 
 if url:
     m = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', url)
     if m:
         vid = m.group(1)
-        with st.status("최적의 모델을 찾아 분석 중...", expanded=True) as status:
+        with st.status("무료 할당량이 넉넉한 Flash 모델로 분석 중...", expanded=True) as status:
             info = get_stats(vid)
             raw = get_comms(vid)
             final = analyze_ai(raw)
             if not final.empty:
                 status.update(label="분석 완료!", state="complete", expanded=False)
             else:
-                status.update(label="분석 실패", state="error", expanded=False)
+                status.update(label="분석 실패 (한도 혹은 데이터 확인)", state="error", expanded=False)
 
         if info and not final.empty:
             st.divider()
@@ -134,3 +151,11 @@ if url:
 
             st.subheader("📋 분석 데이터 리스트")
             st.dataframe(final, use_container_width=True)
+            st.download_button("결과 CSV 다운로드", final.to_csv(index=False).encode('utf-8-sig'), f"analysis_{vid}.csv")
+
+
+
+
+
+
+

@@ -337,29 +337,34 @@ def fetch_comments(vid: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataFrame:
     df["time"] = pd.to_datetime(df["time"])
     return df
 
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_view_history(vid: str) -> pd.DataFrame:
-    """공개일 기준 누적 조회수 추이 시뮬레이션."""
-    info = fetch_video_info(vid)
-    if not info: return pd.DataFrame()
+def fetch_view_history(info: dict) -> pd.DataFrame:
+    """
+    이미 수집된 info dict를 받아 누적 조회수 추이를 시뮬레이션합니다.
+    - 내부에서 API를 재호출하지 않아 캐시 불일치 문제 없음
+    - 오늘 올라온 영상(days=0)도 최소 2포인트 보장
+    """
+    if not info:
+        return pd.DataFrame()
 
     pub   = pd.to_datetime(info["published"])
     now   = pd.Timestamp.now().tz_localize(None)
-    days  = max((now - pub).days, 1)
-    total = int(info["view_count"])   # ← Python int로 명시 (numpy overflow 방지)
+    total = int(info["view_count"])
 
-    n_pts = min(days, 60)
+    # 공개일~현재 시간 차이를 시간 단위로 계산 (days=0이어도 처리)
+    delta_hours = max((now - pub).total_seconds() / 3600, 1)
+    delta_days  = delta_hours / 24
+
+    # 포인트 수: 최소 2, 최대 60
+    n_pts = max(2, min(int(delta_days), 60))
+
+    # 시간 단위로 date_range 생성 (당일 영상도 시간별로 표시)
     dates = pd.date_range(pub, now, periods=n_pts)
 
-    # 지수 증가 시뮬레이션 — float64 범위 내에서 안전하게 계산
+    # 지수 증가 시뮬레이션
     x = np.linspace(0.0, 4.0, n_pts)
-    w = 1.0 - np.exp(-x)             # 0~1 사이 float64
-    if w[-1] > 0:
-        w = w / w[-1]                 # 정규화 (0~1)
-    else:
-        w = np.linspace(0.0, 1.0, n_pts)
+    w = 1.0 - np.exp(-x)
+    w = w / w[-1] if w[-1] > 0 else np.linspace(0.0, 1.0, n_pts)
 
-    # Python int 리스트로 변환 (numpy int64 오버플로우 완전 우회)
     views = [int(round(float(v) * total)) for v in w]
 
     return pd.DataFrame({"date": dates, "views": views})
@@ -450,9 +455,9 @@ BASE = dict(
     margin=dict(l=8, r=8, t=8, b=8),
 )
 
-def chart_view_trend(vid: str) -> go.Figure | None:
-    """원본: 날짜 x축, 순수 라인(영역 없음), 파란색."""
-    df = fetch_view_history(vid)
+def chart_view_trend(info: dict) -> go.Figure | None:
+    """공개일~현재 누적 조회수 추이 라인 차트."""
+    df = fetch_view_history(info)
     if df.empty: return None
 
     span      = (df["date"].iloc[-1] - df["date"].iloc[0]).days
@@ -658,7 +663,7 @@ def main():
     # ════════════════════════════════════════════
     # 📈 시간대별 누적 조회수 추이
     # ════════════════════════════════════════════
-    vt = chart_view_trend(vid)
+    vt = chart_view_trend(info)
     if vt:
         with st.container(border=True):
             st.markdown('<div class="card-title">📈 시간대별 누적 조회수 추이</div>',

@@ -455,27 +455,34 @@ def chart_view_trend(vid: str) -> go.Figure | None:
     df = fetch_view_history(vid)
     if df.empty: return None
 
-    span = (df["date"].iloc[-1] - df["date"].iloc[0]).days
+    span      = (df["date"].iloc[-1] - df["date"].iloc[0]).days
+    max_views = max(df["views"].max(), 1_000_000)  # 최소 100만 보장
 
     # span에 따라 tick 간격과 포맷 결정
     if span <= 7:
-        dtick  = 86400000        # 1일 (ms)
-        fmt    = "%m/%d"
+        dtick = 86400000        # 1일 (ms)
+        fmt   = "%m/%d"
     elif span <= 60:
-        dtick  = 86400000 * 7   # 7일
-        fmt    = "%m/%d"
+        dtick = 86400000 * 7   # 7일
+        fmt   = "%m/%d"
     elif span <= 365:
-        dtick  = "M1"            # 1개월
-        fmt    = "%Y-%m"
+        dtick = "M1"            # 1개월
+        fmt   = "%Y-%m"
     else:
-        dtick  = "M3"            # 3개월
-        fmt    = "%Y-%m"
+        dtick = "M3"            # 3개월
+        fmt   = "%Y-%m"
+
+    # Y축 tick 간격: 최대값 기준 5등분
+    import math
+    raw_tick  = max_views / 5
+    magnitude = 10 ** math.floor(math.log10(raw_tick))
+    y_dtick   = math.ceil(raw_tick / magnitude) * magnitude
 
     fig = go.Figure(go.Scatter(
         x=df["date"], y=df["views"],
         mode="lines",
         line=dict(color="#5b9bd5", width=1.8),
-        hovertemplate="%{x|%Y-%m-%d}: %{y:,}회<extra></extra>",
+        hovertemplate="%{x|%Y-%m-%d}: %{y:,.0f}회<extra></extra>",
     ))
     fig.update_layout(
         **BASE, height=260,
@@ -490,9 +497,10 @@ def chart_view_trend(vid: str) -> go.Figure | None:
         ),
         yaxis=dict(
             showgrid=True, gridcolor="#ececec",
-            zeroline=True, zerolinecolor="#ececec",
-            tickformat=",.0f",      # 천 단위 쉼표, 소수점 없음 (예: 76,349)
-            separatethousands=True,
+            zeroline=False,
+            range=[0, max_views * 1.05],   # 0부터 최대값+5% 여백
+            dtick=y_dtick,
+            tickformat=",.0f",             # 천 단위 쉼표
             tickfont=dict(size=10),
         ),
     )

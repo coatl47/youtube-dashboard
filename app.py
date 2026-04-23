@@ -256,10 +256,12 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_video_info(vid: str) -> dict | None:
+def _fetch_video_info_cached(vid: str) -> dict | None:
+    """캐시 함수 — st.* 호출 없음."""
     try:
         r = _yt().videos().list(part="snippet,statistics", id=vid).execute()
-        if not r.get("items"): return None
+        if not r.get("items"):
+            return {"error": "not_found"}
         item = r["items"][0]; s = item["statistics"]
         return {
             "title":         item["snippet"]["title"],
@@ -269,7 +271,38 @@ def fetch_video_info(vid: str) -> dict | None:
             "like_count":    int(s.get("likeCount",    0)),
             "comment_count": int(s.get("commentCount", 0)),
         }
-    except Exception: return None
+    except HttpError as e:
+        return {"error": f"http_{e.resp.status}", "detail": str(e)}
+    except Exception as e:
+        return {"error": "unknown", "detail": f"{type(e).__name__}: {e}"}
+
+
+def fetch_video_info(vid: str) -> dict | None:
+    """UI 오류 표시 담당."""
+    result = _fetch_video_info_cached(vid)
+    if result is None:
+        st.error("❌ 응답이 없습니다.")
+        return None
+    err = result.get("error")
+    if not err:
+        return result
+    # 오류 유형별 안내
+    if err == "not_found":
+        st.error("❌ 영상을 찾을 수 없습니다. 비공개 또는 삭제된 영상입니다.")
+    elif err == "http_400":
+        st.error(f"❌ 잘못된 요청 (400). Video ID를 확인하세요.\n\n{result.get('detail','')}")
+    elif err == "http_403":
+        st.error(
+            "❌ YouTube API 키 오류 (403)\n\n"
+            "**원인:** API 키가 없거나 잘못되었거나, 일일 할당량이 초과되었습니다.\n\n"
+            "**확인:** Streamlit Cloud → 앱 Settings → Secrets → `YOUTUBE_API_KEY` 값을 확인하세요."
+        )
+    elif err == "http_404":
+        st.error("❌ 영상을 찾을 수 없습니다 (404).")
+    else:
+        st.error(f"❌ 오류 발생: {result.get('detail', err)}")
+    return None
+
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_comments(vid: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataFrame:
@@ -278,7 +311,15 @@ def fetch_comments(vid: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataFrame:
             part="snippet", videoId=vid,
             maxResults=min(limit * 2, 100), order="relevance",
         ).execute()
-    except Exception: return pd.DataFrame()
+    except HttpError as e:
+        if e.resp.status == 403:
+            st.warning("⚠️ 댓글이 비활성화된 영상이거나 API 할당량이 초과되었습니다.")
+        else:
+            st.error(f"❌ 댓글 수집 오류 ({e.resp.status}): {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"❌ 댓글 수집 중 오류: {type(e).__name__}: {e}")
+        return pd.DataFrame()
 
     rows, seen = [], set()
     for item in r.get("items", []):

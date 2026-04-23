@@ -445,7 +445,20 @@ def chart_view_trend(vid: str) -> go.Figure | None:
     if df.empty: return None
 
     span = (df["date"].iloc[-1] - df["date"].iloc[0]).days
-    fmt  = "%b %d\n%Y" if span > 60 else ("%b %d" if span > 7 else "%m/%d %H시")
+
+    # span에 따라 tick 간격과 포맷 결정
+    if span <= 7:
+        dtick  = 86400000        # 1일 (ms)
+        fmt    = "%m/%d"
+    elif span <= 60:
+        dtick  = 86400000 * 7   # 7일
+        fmt    = "%m/%d"
+    elif span <= 365:
+        dtick  = "M1"            # 1개월
+        fmt    = "%Y-%m"
+    else:
+        dtick  = "M3"            # 3개월
+        fmt    = "%Y-%m"
 
     fig = go.Figure(go.Scatter(
         x=df["date"], y=df["views"],
@@ -455,12 +468,21 @@ def chart_view_trend(vid: str) -> go.Figure | None:
     ))
     fig.update_layout(
         **BASE, height=260,
-        xaxis=dict(showgrid=False, zeroline=False,
-                   tickformat=fmt, tickangle=0,
-                   tickfont=dict(size=10)),
-        yaxis=dict(showgrid=True, gridcolor="#ececec", zeroline=True,
-                   zerolinecolor="#ececec", tickformat=",",
-                   tickfont=dict(size=10)),
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            type="date",
+            tickformat=fmt,
+            dtick=dtick,
+            tickangle=-30,
+            tickfont=dict(size=10),
+        ),
+        yaxis=dict(
+            showgrid=True, gridcolor="#ececec",
+            zeroline=True, zerolinecolor="#ececec",
+            tickformat=",",
+            tickfont=dict(size=10),
+        ),
     )
     return fig
 

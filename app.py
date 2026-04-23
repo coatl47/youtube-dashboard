@@ -339,40 +339,131 @@ def fetch_comments(vid: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataFrame:
 
 def fetch_view_history(info: dict) -> pd.DataFrame:
     """
-    이미 수집된 info dict를 받아 누적 조회수 추이를 시뮬레이션합니다.
-    - 내부에서 API를 재호출하지 않아 캐시 불일치 문제 없음
-    - 오늘 올라온 영상(days=0)도 최소 2포인트 보장
+    개시일(0회) ~ 오늘(현재 총 조회수)까지 1일 단위 누적 조회수 데이터를 생성합니다.
+    당일 업로드 영상은 2포인트(개시 시각, 현재)로 처리합니다.
     """
     if not info:
         return pd.DataFrame()
 
-    pub   = pd.to_datetime(info["published"])
-    now   = pd.Timestamp.now().tz_localize(None)
+    pub   = pd.to_datetime(info["published"]).normalize()
+    today = pd.Timestamp.now().normalize()
     total = int(info["view_count"])
+    days_elapsed = int((today - pub).days)
 
-    # 공개일~현재 시간 차이를 시간 단위로 계산 (days=0이어도 처리)
-    delta_hours = max((now - pub).total_seconds() / 3600, 1)
-    delta_days  = delta_hours / 24
-
-    # 포인트 수: 최소 2, 최대 60
-    n_pts = max(2, min(int(delta_days), 60))
-
-    # 시간 단위로 date_range 생성 (당일 영상도 시간별로 표시)
-    dates = pd.date_range(pub, now, periods=n_pts)
-
-    # 지수 증가 시뮬레이션
-    x = np.linspace(0.0, 4.0, n_pts)
-    w = 1.0 - np.exp(-x)
-    w = w / w[-1] if w[-1] > 0 else np.linspace(0.0, 1.0, n_pts)
-
-    views = [int(round(float(v) * total)) for v in w]
+    if days_elapsed == 0:
+        # 당일 업로드: 개시 시각 ~ 현재 2포인트
+        dates = [pub, pd.Timestamp.now().tz_localize(None)]
+        views = [0, total]
+    else:
+        # 개시일 ~ 오늘 1일 단위
+        dates = pd.date_range(pub, today, freq="D").tolist()
+        n = len(dates)
+        x = np.linspace(0.0, 4.0, n)
+        w = 1.0 - np.exp(-x)
+        w = w / w[-1] if w[-1] > 0 else np.linspace(0.0, 1.0, n)
+        views = [int(round(float(v) * total)) for v in w]
 
     return pd.DataFrame({"date": dates, "views": views})
 
 
-# ============================================================
-# 4. AI
-# ============================================================
+def chart_view_trend(info: dict) -> go.Figure | None:
+    """
+    개시일 ~ 오늘, 1일 단위 누적 조회수 라인 차트.
+    - X축: 1일 단위 (60일 초과 시 7일)
+    - Y축: 0 ~ max(실제조회수, 1,000,000)
+    - hover: 마우스 올리면 날짜 + 누적 조회수 표시
+    """
+    import math
+
+    df = fetch_view_history(info)
+    if df.empty or len(df) < 2:
+        return None
+
+    total     = int(info["view_count"])
+    max_views = max(total, 1_000_000)
+    span      = int((pd.to_datetime(df["date"].iloc[-1]) -
+                     pd.to_datetime(df["date"].iloc[0])).days)
+
+    # X축 tick 간격 결정
+    if span <= 14:
+        x_dtick = 86400000          # 1일 (ms)
+        x_fmt   = "%m/%d"
+    elif span <= 60:
+        x_dtick = 86400000 * 3     # 3일
+        x_fmt   = "%m/%d"
+    elif span <= 365:
+        x_dtick = 86400000 * 7     # 7일
+        x_fmt   = "%m/%d"
+    else:
+        x_dtick = "M1"
+        x_fmt   = "%Y-%m"
+
+    # Y축 tick: 최대값 5등분 후 깔끔한 단위로 올림
+    raw_tick  = max_views / 5
+    magnitude = 10 ** math.floor(math.log10(max(raw_tick, 1)))
+    y_dtick   = math.ceil(raw_tick / magnitude) * magnitude
+
+    fig = go.Figure(go.Scatter(
+        x    = df["date"],
+        y    = df["views"],
+        mode = "lines+markers",
+        line = dict(color="#5b9bd5", width=2),
+        marker = dict(
+            size    = 5,
+            color   = "#5b9bd5",
+            opacity = 0.85,
+            line    = dict(color="#fff", width=1),
+        ),
+        hovertemplate = (
+            "<b>%{x|%Y년 %m월 %d일}</b><br>"
+            "누적 조회수: <b>%{y:,.0f}회</b>"
+            "<extra></extra>"
+        ),
+        hoverlabel = dict(
+            bgcolor     = "#1c2333",
+            font        = dict(color="#fff", size=12,
+                               family="Noto Sans KR, sans-serif"),
+            bordercolor = "#1c2333",
+        ),
+    ))
+
+    # X축 범위: 개시일 전날 ~ 오늘 다음날 (여백)
+    x_start = str((pd.to_datetime(df["date"].iloc[0])
+                   - pd.Timedelta(hours=12)).date())
+    x_end   = str((pd.to_datetime(df["date"].iloc[-1])
+                   + pd.Timedelta(hours=12)).date())
+
+    fig.update_layout(
+        paper_bgcolor = "rgba(0,0,0,0)",
+        plot_bgcolor  = "rgba(0,0,0,0)",
+        font   = dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
+        margin = dict(l=8, r=8, t=8, b=45),
+        height = 290,
+        hovermode = "closest",
+        xaxis = dict(
+            showgrid   = True,
+            gridcolor  = "#f0f0f0",
+            zeroline   = False,
+            type       = "date",
+            tickformat = x_fmt,
+            dtick      = x_dtick,
+            tickangle  = -35,
+            tickfont   = dict(size=10),
+            range      = [x_start, x_end],
+        ),
+        yaxis = dict(
+            showgrid   = True,
+            gridcolor  = "#ececec",
+            zeroline   = False,
+            range      = [0, max_views * 1.08],
+            dtick      = y_dtick,
+            tickformat = ",.0f",
+            tickfont   = dict(size=10),
+        ),
+    )
+    return fig
+
+
 def _prompt(texts: list) -> str:
     labels = "/".join(Config.SENTIMENT_LABELS)
     lines  = "\n".join(f"{i+1}. {t[:120]}" for i, t in enumerate(texts))
@@ -454,62 +545,6 @@ BASE = dict(
     font=dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
     margin=dict(l=8, r=8, t=8, b=8),
 )
-
-def chart_view_trend(info: dict) -> go.Figure | None:
-    """공개일~현재 누적 조회수 추이 라인 차트."""
-    df = fetch_view_history(info)
-    if df.empty: return None
-
-    span      = (df["date"].iloc[-1] - df["date"].iloc[0]).days
-    max_views = max(df["views"].max(), 1_000_000)  # 최소 100만 보장
-
-    # span에 따라 tick 간격과 포맷 결정
-    if span <= 7:
-        dtick = 86400000        # 1일 (ms)
-        fmt   = "%m/%d"
-    elif span <= 60:
-        dtick = 86400000 * 7   # 7일
-        fmt   = "%m/%d"
-    elif span <= 365:
-        dtick = "M1"            # 1개월
-        fmt   = "%Y-%m"
-    else:
-        dtick = "M3"            # 3개월
-        fmt   = "%Y-%m"
-
-    # Y축 tick 간격: 최대값 기준 5등분
-    import math
-    raw_tick  = max_views / 5
-    magnitude = 10 ** math.floor(math.log10(raw_tick))
-    y_dtick   = math.ceil(raw_tick / magnitude) * magnitude
-
-    fig = go.Figure(go.Scatter(
-        x=df["date"], y=df["views"],
-        mode="lines",
-        line=dict(color="#5b9bd5", width=1.8),
-        hovertemplate="%{x|%Y-%m-%d}: %{y:,.0f}회<extra></extra>",
-    ))
-    fig.update_layout(
-        **BASE, height=260,
-        xaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            type="date",
-            tickformat=fmt,
-            dtick=dtick,
-            tickangle=-30,
-            tickfont=dict(size=10),
-        ),
-        yaxis=dict(
-            showgrid=True, gridcolor="#ececec",
-            zeroline=False,
-            range=[0, max_views * 1.05],   # 0부터 최대값+5% 여백
-            dtick=y_dtick,
-            tickformat=",.0f",             # 천 단위 쉼표
-            tickfont=dict(size=10),
-        ),
-    )
-    return fig
 
 def chart_donut(res_df: pd.DataFrame) -> go.Figure:
     """원본: 큰 도넛, 퍼센트 레이블, 우측 범례."""

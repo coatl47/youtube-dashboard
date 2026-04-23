@@ -480,7 +480,8 @@ def chart_view_trend(vid: str) -> go.Figure | None:
         yaxis=dict(
             showgrid=True, gridcolor="#ececec",
             zeroline=True, zerolinecolor="#ececec",
-            tickformat=",",
+            tickformat=",.0f",      # 천 단위 쉼표, 소수점 없음 (예: 76,349)
+            separatethousands=True,
             tickfont=dict(size=10),
         ),
     )

@@ -422,7 +422,17 @@ def chart_view_trend(info: dict) -> go.Figure | None:
         return None
 
     total     = int(info["view_count"])
-    max_views = max(total, 1_000_000)
+    # Y축 최대: 현재 조회수 기준으로 깔끔하게 올림 (조회수가 그래프 상단에 표시되도록)
+    # 예) 8,056 → 10,000 / 76,349 → 100,000 / 1,200,000 → 2,000,000
+    import math as _math
+    if total > 0:
+        magnitude = 10 ** _math.floor(_math.log10(total))
+        max_views = _math.ceil(total / magnitude) * magnitude
+        # 최소 눈금이 너무 촘촘해지지 않도록 2배 여유
+        if max_views == total:
+            max_views = int(total * 1.2)
+    else:
+        max_views = 10_000  # 조회수 0일 때 기본값
     span_days = int((df["date"].iloc[-1] - df["date"].iloc[0]).days)
 
     # Y축 tick

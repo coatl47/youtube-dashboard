@@ -342,16 +342,27 @@ def fetch_view_history(vid: str) -> pd.DataFrame:
     """공개일 기준 누적 조회수 추이 시뮬레이션."""
     info = fetch_video_info(vid)
     if not info: return pd.DataFrame()
-    pub  = pd.to_datetime(info["published"])
-    now  = pd.Timestamp.now().tz_localize(None)
-    days = max((now - pub).days, 1)
-    # 60포인트로 시뮬레이션 (일 단위)
-    dates = pd.date_range(pub, now, periods=min(days, 60))
-    total = info["view_count"]
-    x = np.linspace(0, 4, len(dates))
-    w = (1 - np.exp(-x))
-    w = w / w[-1] * total
-    return pd.DataFrame({"date": dates, "views": w.astype(int)})
+
+    pub   = pd.to_datetime(info["published"])
+    now   = pd.Timestamp.now().tz_localize(None)
+    days  = max((now - pub).days, 1)
+    total = int(info["view_count"])   # ← Python int로 명시 (numpy overflow 방지)
+
+    n_pts = min(days, 60)
+    dates = pd.date_range(pub, now, periods=n_pts)
+
+    # 지수 증가 시뮬레이션 — float64 범위 내에서 안전하게 계산
+    x = np.linspace(0.0, 4.0, n_pts)
+    w = 1.0 - np.exp(-x)             # 0~1 사이 float64
+    if w[-1] > 0:
+        w = w / w[-1]                 # 정규화 (0~1)
+    else:
+        w = np.linspace(0.0, 1.0, n_pts)
+
+    # Python int 리스트로 변환 (numpy int64 오버플로우 완전 우회)
+    views = [int(round(float(v) * total)) for v in w]
+
+    return pd.DataFrame({"date": dates, "views": views})
 
 
 # ============================================================

@@ -339,39 +339,81 @@ def fetch_comments(vid: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataFrame:
 
 def fetch_view_history(info: dict) -> pd.DataFrame:
     """
-    개시일(0회) ~ 오늘(현재 총 조회수)까지 1일 단위 누적 조회수 데이터를 생성합니다.
-    당일 업로드 영상은 2포인트(개시 시각, 현재)로 처리합니다.
+    개시일 당일: 시간 단위 포인트 (개시 시각 ~ 자정 or 현재)
+    개시일 다음날~오늘: 1일 단위 포인트 (날짜별 누적 조회수)
+    두 구간을 이어붙여 하나의 DataFrame으로 반환합니다.
     """
     if not info:
         return pd.DataFrame()
 
-    pub   = pd.to_datetime(info["published"]).normalize()
-    today = pd.Timestamp.now().normalize()
-    total = int(info["view_count"])
-    days_elapsed = int((today - pub).days)
+    pub_raw = pd.to_datetime(info["published"])           # 개시 정확 시각 (UTC 등)
+    pub_day = pub_raw.normalize()                          # 개시일 00:00
+    now     = pd.Timestamp.now().tz_localize(None)
+    today   = now.normalize()                              # 오늘 00:00
+    total   = int(info["view_count"])
+    days_elapsed = int((today - pub_day).days)
 
+    rows = []  # {"date": Timestamp, "views": int, "is_hourly": bool}
+
+    # ── 구간 1: 개시일 당일 시간 단위 ───────────────────────
+    day0_end = pub_day + pd.Timedelta(days=1)  # 개시일 자정 (다음날 00:00)
+    hour_end = min(day0_end, now)              # 자정 or 현재 중 이른 시각
+
+    # 개시 시각 ~ hour_end 를 1시간 간격으로
+    hour_range = pd.date_range(pub_raw.floor("h"), hour_end, freq="h")
+    if len(hour_range) < 2:
+        hour_range = pd.DatetimeIndex([pub_raw.floor("h"), hour_end])
+
+    n_h = len(hour_range)
     if days_elapsed == 0:
-        # 당일 업로드: 개시 시각 ~ 현재 2포인트
-        dates = [pub, pd.Timestamp.now().tz_localize(None)]
-        views = [0, total]
+        # 당일이면 마지막 포인트 = 현재 total
+        end_views = total
     else:
-        # 개시일 ~ 오늘 1일 단위
-        dates = pd.date_range(pub, today, freq="D").tolist()
-        n = len(dates)
-        x = np.linspace(0.0, 4.0, n)
-        w = 1.0 - np.exp(-x)
-        w = w / w[-1] if w[-1] > 0 else np.linspace(0.0, 1.0, n)
-        views = [int(round(float(v) * total)) for v in w]
+        # 개시일 하루 동안의 조회수 = total * 첫날 비중(지수 모델 day0 기여분)
+        # 전체 n일 중 day0 가중치를 지수 곡선에서 추정
+        n_total = days_elapsed + 1
+        x_all   = np.linspace(0.0, 4.0, n_total)
+        w_all   = 1.0 - np.exp(-x_all)
+        w_all   = w_all / w_all[-1]
+        end_views = int(round(float(w_all[0]) * total))  # day0 끝 조회수 (거의 0에 가까움)
+        end_views = max(end_views, 1)
 
-    return pd.DataFrame({"date": dates, "views": views})
+    # 시간 내 지수 증가
+    x_h = np.linspace(0.0, 2.0, n_h)
+    w_h = 1.0 - np.exp(-x_h)
+    w_h = w_h / w_h[-1] if w_h[-1] > 0 else np.linspace(0.0, 1.0, n_h)
+    for ts, wv in zip(hour_range, w_h):
+        rows.append({"date": ts, "views": int(round(float(wv) * end_views)),
+                     "is_hourly": True})
+
+    # ── 구간 2: 개시일 다음날 ~ 오늘 1일 단위 ───────────────
+    if days_elapsed >= 1:
+        day1     = pub_day + pd.Timedelta(days=1)
+        day_range = pd.date_range(day1, today, freq="D").tolist()
+        n_d      = len(day_range)
+
+        # day1 ~ today 구간의 누적 조회수 범위: end_views ~ total
+        x_d = np.linspace(0.0, 4.0, n_d + 1)[1:]   # day1부터 시작 (day0 제외)
+        # 전체 지수 곡선에서 day1 이후 부분 재정규화
+        n_total = days_elapsed + 1
+        x_all   = np.linspace(0.0, 4.0, n_total)
+        w_all   = 1.0 - np.exp(-x_all)
+        w_all   = w_all / w_all[-1]
+
+        for i, ts in enumerate(day_range):
+            rows.append({"date": ts,
+                         "views": int(round(float(w_all[i + 1]) * total)),
+                         "is_hourly": False})
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 def chart_view_trend(info: dict) -> go.Figure | None:
     """
-    개시일 ~ 오늘, 1일 단위 누적 조회수 라인 차트.
-    - X축: 1일 단위 (60일 초과 시 7일)
-    - Y축: 0 ~ max(실제조회수, 1,000,000)
-    - hover: 마우스 올리면 날짜 + 누적 조회수 표시
+    개시일 당일: 시간 단위 / 다음날 이후: 1일 단위 누적 조회수 차트.
+    hover 시 날짜(시간) + 누적 조회수 표시.
     """
     import math
 
@@ -381,42 +423,54 @@ def chart_view_trend(info: dict) -> go.Figure | None:
 
     total     = int(info["view_count"])
     max_views = max(total, 1_000_000)
-    span      = int((pd.to_datetime(df["date"].iloc[-1]) -
-                     pd.to_datetime(df["date"].iloc[0])).days)
+    span_days = int((df["date"].iloc[-1] - df["date"].iloc[0]).days)
 
-    # X축 tick 간격 결정
-    if span <= 14:
-        x_dtick = 86400000          # 1일 (ms)
+    # Y축 tick
+    raw_tick  = max_views / 5
+    magnitude = 10 ** math.floor(math.log10(max(raw_tick, 1)))
+    y_dtick   = math.ceil(raw_tick / magnitude) * magnitude
+
+    # X축 tick: 전체 span 기준
+    if span_days <= 3:
+        x_dtick = 3600000 * 6      # 6시간 (ms)
+        x_fmt   = "%m/%d %H시"
+    elif span_days <= 14:
+        x_dtick = 86400000         # 1일
         x_fmt   = "%m/%d"
-    elif span <= 60:
-        x_dtick = 86400000 * 3     # 3일
+    elif span_days <= 60:
+        x_dtick = 86400000 * 3    # 3일
         x_fmt   = "%m/%d"
-    elif span <= 365:
-        x_dtick = 86400000 * 7     # 7일
+    elif span_days <= 365:
+        x_dtick = 86400000 * 7    # 7일
         x_fmt   = "%m/%d"
     else:
         x_dtick = "M1"
         x_fmt   = "%Y-%m"
 
-    # Y축 tick: 최대값 5등분 후 깔끔한 단위로 올림
-    raw_tick  = max_views / 5
-    magnitude = 10 ** math.floor(math.log10(max(raw_tick, 1)))
-    y_dtick   = math.ceil(raw_tick / magnitude) * magnitude
+    # hover 텍스트: 시간 단위 포인트는 시각 포함, 일 단위는 날짜만
+    customdata = []
+    hover_texts = []
+    for _, row in df.iterrows():
+        ts = row["date"]
+        if row["is_hourly"]:
+            label = f"{ts.month}월 {ts.day}일 {ts.hour:02d}:00"
+        else:
+            label = f"{ts.year}년 {ts.month}월 {ts.day}일"
+        hover_texts.append(label)
+        customdata.append(int(row["views"]))
 
     fig = go.Figure(go.Scatter(
-        x    = df["date"],
-        y    = df["views"],
-        mode = "lines+markers",
-        line = dict(color="#5b9bd5", width=2),
-        marker = dict(
-            size    = 5,
-            color   = "#5b9bd5",
-            opacity = 0.85,
-            line    = dict(color="#fff", width=1),
-        ),
+        x          = df["date"],
+        y          = df["views"],
+        mode       = "lines+markers",
+        line       = dict(color="#5b9bd5", width=2),
+        marker     = dict(size=4, color="#5b9bd5", opacity=0.8,
+                          line=dict(color="#fff", width=1)),
+        text       = hover_texts,
+        customdata = customdata,
         hovertemplate = (
-            "<b>%{x|%Y년 %m월 %d일}</b><br>"
-            "누적 조회수: <b>%{y:,.0f}회</b>"
+            "<b>%{text}</b><br>"
+            "누적 조회수: <b>%{customdata:,}회</b>"
             "<extra></extra>"
         ),
         hoverlabel = dict(
@@ -427,18 +481,15 @@ def chart_view_trend(info: dict) -> go.Figure | None:
         ),
     ))
 
-    # X축 범위: 개시일 전날 ~ 오늘 다음날 (여백)
-    x_start = str((pd.to_datetime(df["date"].iloc[0])
-                   - pd.Timedelta(hours=12)).date())
-    x_end   = str((pd.to_datetime(df["date"].iloc[-1])
-                   + pd.Timedelta(hours=12)).date())
+    x_start = str((df["date"].iloc[0]  - pd.Timedelta(hours=6)).isoformat())
+    x_end   = str((df["date"].iloc[-1] + pd.Timedelta(hours=6)).isoformat())
 
     fig.update_layout(
         paper_bgcolor = "rgba(0,0,0,0)",
         plot_bgcolor  = "rgba(0,0,0,0)",
         font   = dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
-        margin = dict(l=8, r=8, t=8, b=45),
-        height = 290,
+        margin = dict(l=8, r=8, t=8, b=50),
+        height = 300,
         hovermode = "closest",
         xaxis = dict(
             showgrid   = True,

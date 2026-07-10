@@ -659,7 +659,7 @@ def chart_topic_bar(res_df: pd.DataFrame) -> go.Figure:
 # ============================================================
 
 # ── 분석 대상 영상 (코드 변경 시 이 URL만 수정하세요) ────────
-TARGET_URL = "https://www.youtube.com/watch?v=kVgI0YmPSc8"
+TARGET_URL = "https://www.youtube.com/watch?v=fNHLffyXnQM&t=3s"
 # ──────────────────────────────────────────────────────────────
 
 def main():

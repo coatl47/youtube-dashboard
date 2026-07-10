@@ -162,23 +162,6 @@ footer { display: none !important; }
 }
 .disclaimer ul { text-align:left; padding-left:1.2rem; margin:0; }
 
-/* ── URL 입력 ── */
-.stTextInput input {
-    border-radius:6px !important; border:1px solid #d9d9d9 !important;
-    font-size:0.88rem !important; background:#fff !important;
-}
-.stTextInput input:focus {
-    border-color:#1f77b4 !important;
-    box-shadow:0 0 0 2px rgba(31,119,180,0.15) !important;
-}
-.stButton > button {
-    background:#1f77b4 !important; color:#fff !important;
-    border:none !important; border-radius:6px !important;
-    font-size:0.85rem !important; font-weight:700 !important;
-    padding:0.48rem 1.2rem !important; width:100% !important;
-}
-.stButton > button:hover { background:#155f8a !important; }
-
 /* ── selectbox ── */
 [data-baseweb="select"] * { font-size:0.82rem !important; }
 
@@ -674,35 +657,21 @@ def chart_topic_bar(res_df: pd.DataFrame) -> go.Figure:
 # ============================================================
 # 7. 메인
 # ============================================================
+
+# ── 분석 대상 영상 (코드 변경 시 이 URL만 수정하세요) ────────
+TARGET_URL = "https://www.youtube.com/watch?v=kVgI0YmPSc8"
+# ──────────────────────────────────────────────────────────────
+
 def main():
 
     # ── 타이틀 ───────────────────────────────────────────────
     st.markdown('<div class="page-title">📊 국민연금 유튜브 여론 모니터링</div>',
                 unsafe_allow_html=True)
 
-    # ── URL 입력 ─────────────────────────────────────────────
-    col_url, col_btn = st.columns([5, 1])
-    with col_url:
-        url = st.text_input("URL", placeholder="유튜브 영상 URL을 입력하세요",
-                            label_visibility="collapsed")
-    with col_btn:
-        run = st.button("분석", use_container_width=True)
-
-    # 초기 화면
-    if not (run and url):
-        st.markdown("""
-        <div class="card" style="text-align:center;padding:3rem 1rem;color:#bbb;">
-            <div style="font-size:2rem;margin-bottom:0.6rem;">🔍</div>
-            <div style="font-size:0.88rem;color:#aaa;">
-                분석할 유튜브 영상 URL을 입력하고 분석 버튼을 누르세요.
-            </div>
-        </div>""", unsafe_allow_html=True)
-        return
-
-    # ── 영상 ID 추출 ─────────────────────────────────────────
-    vid = extract_video_id(url)
+    # ── 영상 ID 추출 (하드코딩) ──────────────────────────────
+    vid = extract_video_id(TARGET_URL)
     if not vid:
-        st.error("❌ 유효하지 않은 유튜브 URL입니다.")
+        st.error("❌ TARGET_URL이 유효하지 않습니다. 코드 상단의 URL을 확인하세요.")
         return
 
     # ── 수집 ─────────────────────────────────────────────────
@@ -711,7 +680,7 @@ def main():
         raw_df = fetch_comments(vid)
 
     if not info:
-        st.error("❌ 영상 정보를 가져올 수 없습니다."); return
+        return
     if raw_df.empty:
         st.error("❌ 댓글을 수집할 수 없습니다."); return
 

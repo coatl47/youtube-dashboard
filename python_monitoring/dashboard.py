@@ -53,10 +53,10 @@ st.markdown(
     [data-testid="stButton"] button:hover { color:#fff; border:0; transform:translateY(-1px); }
     .st-key-top_controls { width:100%; overflow:hidden; }
     .st-key-top_controls [data-testid="stHorizontalBlock"] {
-      display:grid!important; grid-template-columns:minmax(0,1fr) 62px; gap:6px; width:100%; align-items:stretch;
+      display:grid!important; grid-template-columns:minmax(0,1fr) 84px; gap:6px; width:100%; align-items:stretch;
     }
     .st-key-top_controls [data-testid="column"] { width:auto!important; min-width:0!important; flex:none!important; }
-    .st-key-top_controls [data-testid="stButton"] button { min-height:48px; padding:0 4px; font-size:.69rem; white-space:nowrap; }
+    .st-key-top_controls [data-testid="stButton"] button { width:100%; min-height:48px; padding:0 12px; font-size:.74rem; white-space:nowrap; }
 
     .hero {
       margin:12px 0 16px; padding:22px 16px; border-radius:19px;

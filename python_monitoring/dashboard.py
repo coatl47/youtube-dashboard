@@ -121,8 +121,6 @@ st.markdown(
       font-size:.66rem; font-weight:850; line-height:1.15; text-align:center; word-break:keep-all; }
     .keyword-cell { font-weight:850; color:#202938; word-break:keep-all; }
     .comment-cell { color:#323d4c; white-space:normal; }
-    [data-testid="stExpander"] { background:#fff; border:1px solid #e1e6ed; border-radius:14px; margin-bottom:9px; }
-
     .notice-card { background:#fff; border:1px solid #e2e7ee; border-radius:20px; padding:20px 22px;
       box-shadow:0 9px 25px rgba(39,61,88,.055); color:#6e7888; font-size:.78rem; line-height:1.7; }
     .notice-card strong { display:block; color:#263449; font-size:.9rem; margin-bottom:6px; }
@@ -336,23 +334,7 @@ with st.container(border=True):
 
 if comments:
     df = pd.DataFrame(comments)
-    with st.expander("검색·필터", expanded=False):
-        f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
-        query = f1.text_input("댓글·키워드 검색", placeholder="검색어 입력")
-        sentiment = f2.selectbox("감성", ["전체", "긍정", "중립", "부정"])
-        risk = f3.selectbox("위험", ["전체", "긴급", "주의", "관찰"])
-        topic = f4.selectbox("분류", ["전체", *sorted(df["topic"].dropna().unique())])
-
-        filtered = df.copy()
-        if query:
-            mask = filtered["text_plain"].str.contains(query, case=False, na=False) | filtered["keyword"].str.contains(query, case=False, na=False)
-            filtered = filtered[mask]
-        if sentiment != "전체":
-            filtered = filtered[filtered["sentiment"] == sentiment]
-        if risk != "전체":
-            filtered = filtered[filtered["risk"] == risk]
-        if topic != "전체":
-            filtered = filtered[filtered["topic"] == topic]
+    filtered = df.copy()
 
     allowed_sorts = {
         "sentiment":"sentiment", "topic":"topic", "keyword":"keyword", "comment":"text_plain",

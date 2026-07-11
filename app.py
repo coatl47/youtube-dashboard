@@ -3,20 +3,25 @@
 디자인: roy8in.github.io 모바일 스크린샷 1:1 재현
 """
 
-import io
+import html
+import json
+import math
 import re
 import time
 import hashlib
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from google import genai
+from google.genai import types as genai_types
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+KST = ZoneInfo("Asia/Seoul")
 
 
 # ============================================================
@@ -302,9 +307,6 @@ footer { display: none !important; }
     color: #e65100; margin-bottom: 0.4rem;
 }
 .disclaimer ul { padding-left: 1.1rem; margin: 0; }
-
-/* metric 기본 숨김 */
-[data-testid="metric-container"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -325,6 +327,7 @@ class Config:
     MAX_RETRIES     = 2
     RETRY_WAIT      = 15
     MAX_TOPICS      = 8
+    AD_LABEL        = "광고/홍보"          # 프롬프트와 차트 필터가 공유하는 고정 라벨
 
     SENTIMENT_LABELS = ["긍정", "부정", "중립"]
     SENTIMENT_COLORS = {"긍정": "#2ca02c", "부정": "#d62728", "중립": "#9e9e9e"}
@@ -338,35 +341,36 @@ TARGET_URL = "https://www.youtube.com/watch?v=fNHLffyXnQM&t=3s"
 
 
 # ============================================================
-# 3. Gemini
+# 3. API 클라이언트
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def _gemini_client():
     return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-def _is_quota(e):
-    return any(k.lower() in str(e).lower()
-               for k in ["429","RESOURCE_EXHAUSTED","quota","rate limit"])
-
-def _is_404(e):
-    return any(k in str(e).lower()
-               for k in ["not found","404","does not exist","unsupported"])
-
-
-# ============================================================
-# 4. YouTube
-# ============================================================
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def _yt():
     return build("youtube", "v3", developerKey=st.secrets["YOUTUBE_API_KEY"])
 
+def _is_quota(e) -> bool:
+    return any(k in str(e).lower()
+               for k in ["429", "resource_exhausted", "quota", "rate limit"])
+
+def _is_unavailable(e) -> bool:
+    return any(k in str(e).lower()
+               for k in ["not found", "404", "does not exist", "unsupported"])
+
+
+# ============================================================
+# 4. YouTube 수집
+# ============================================================
 def extract_video_id(url: str) -> str | None:
     for pat in [r"(?:v=)([0-9A-Za-z_-]{11})",
-                r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
-                r"(?:embed\/)([0-9A-Za-z_-]{11})",
-                r"(?:shorts\/)([0-9A-Za-z_-]{11})"]:
+                r"(?:youtu\.be/)([0-9A-Za-z_-]{11})",
+                r"(?:embed/)([0-9A-Za-z_-]{11})",
+                r"(?:shorts/)([0-9A-Za-z_-]{11})"]:
         m = re.search(pat, url)
-        if m: return m.group(1)
+        if m:
+            return m.group(1)
     return None
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -375,11 +379,12 @@ def _fetch_info_cached(vid: str) -> dict:
         r = _yt().videos().list(part="snippet,statistics", id=vid).execute()
         if not r.get("items"):
             return {"error": "not_found"}
-        item = r["items"][0]; s = item["statistics"]
+        item = r["items"][0]
+        s = item["statistics"]
         return {
             "title":         item["snippet"]["title"],
             "channel":       item["snippet"]["channelTitle"],
-            "published":     item["snippet"]["publishedAt"],   # 전체 ISO 포맷
+            "published":     item["snippet"]["publishedAt"],   # ISO-8601 UTC
             "view_count":    int(s.get("viewCount",    0)),
             "like_count":    int(s.get("likeCount",    0)),
             "comment_count": int(s.get("commentCount", 0)),
@@ -391,111 +396,164 @@ def _fetch_info_cached(vid: str) -> dict:
 
 def fetch_video_info(vid: str) -> dict | None:
     result = _fetch_info_cached(vid)
-    if not result: st.error("❌ 응답 없음"); return None
     err = result.get("error")
-    if not err: return result
+    if not err:
+        return result
     msgs = {
-        "not_found": "❌ 영상 없음 (비공개/삭제)",
-        "http_403":  "❌ YouTube API 키 오류(403)",
-        "http_404":  "❌ 영상 없음(404)",
+        "not_found": "❌ 영상을 찾을 수 없습니다 (비공개/삭제).",
+        "http_403":  "❌ YouTube API 키 오류 또는 할당량 초과 (403).",
+        "http_404":  "❌ 영상을 찾을 수 없습니다 (404).",
     }
-    st.error(msgs.get(err, f"❌ 오류: {result.get('detail', err)}")); return None
+    st.error(msgs.get(err, f"❌ 오류: {result.get('detail', err)}"))
+    return None
 
-def _collect_page(vid: str, order: str, limit: int) -> list:
+def _clean_comment(text: str) -> str:
+    text = re.sub(r"https?://\S+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def _collect_page(vid: str, order: str, limit: int) -> tuple[list, str | None]:
     rows, seen, next_token = [], set(), None
     while len(rows) < limit:
         try:
-            params = dict(part="snippet", videoId=vid, maxResults=100, order=order)
-            if next_token: params["pageToken"] = next_token
+            params = dict(part="snippet", videoId=vid, maxResults=100,
+                          order=order, textFormat="plainText")
+            if next_token:
+                params["pageToken"] = next_token
             r = _yt().commentThreads().list(**params).execute()
-        except Exception: break
+        except HttpError as e:
+            if "commentsDisabled" in str(e):
+                return rows, "댓글 사용이 중지된 영상입니다."
+            return rows, f"YouTube API 오류 ({e.resp.status})"
+        except Exception as e:
+            return rows, f"{type(e).__name__}: {e}"
         for item in r.get("items", []):
             s = item["snippet"]["topLevelComment"]["snippet"]
-            c = re.sub(r"<[^>]+>", "", s.get("textDisplay", ""))
-            c = re.sub(r"https?://\S+", "", c).replace("\n", " ").strip()
-            if len(c) < Config.COMMENT_MIN_LEN or c in seen: continue
+            c = _clean_comment(s.get("textDisplay", ""))
+            if len(c) < Config.COMMENT_MIN_LEN or c in seen:
+                continue
             seen.add(c)
             rows.append({"time": s["publishedAt"], "text": c,
                          "likes": int(s.get("likeCount", 0)), "order": order})
-            if len(rows) >= limit: break
+            if len(rows) >= limit:
+                break
         next_token = r.get("nextPageToken")
-        if not next_token: break
-    return rows
+        if not next_token:
+            break
+    return rows, None
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_comments(vid: str) -> pd.DataFrame:
-    popular = _collect_page(vid, "relevance", Config.SAMPLE_POPULAR)
-    recent  = _collect_page(vid, "time",      Config.SAMPLE_RECENT)
+def fetch_comments(vid: str) -> tuple[pd.DataFrame, str | None]:
+    popular, err1 = _collect_page(vid, "relevance", Config.SAMPLE_POPULAR)
+    recent,  err2 = _collect_page(vid, "time",      Config.SAMPLE_RECENT)
     seen, merged = set(), []
     for row in popular + recent:
         if row["text"] not in seen:
-            seen.add(row["text"]); merged.append(row)
-    if not merged: return pd.DataFrame()
+            seen.add(row["text"])
+            merged.append(row)
+    if not merged:
+        return pd.DataFrame(), err1 or err2
     df = pd.DataFrame(merged)
     df["time"] = pd.to_datetime(df["time"])
-    return df
+    return df, None
 
 
 # ============================================================
-# 5. AI 분석
+# 5. AI 분석 (JSON 구조화 출력 + 원문 인덱스 조인)
 # ============================================================
-def _prompt(texts: list) -> str:
-    labels = "/".join(Config.SENTIMENT_LABELS)
-    lines  = "\n".join(f"{i+1}. {t[:120]}" for i, t in enumerate(texts))
-    return (f"다음 댓글을 분석해 CSV로 출력하세요.\n"
-            f"헤더: 감성|분류|키워드|댓글내용\n"
-            f"규칙: 감성={labels} 중 하나만. 영어 금지. CSV만 출력.\n\n{lines}")
+def _build_prompt(texts: list[str]) -> str:
+    labels = ", ".join(f'"{s}"' for s in Config.SENTIMENT_LABELS)
+    lines = "\n".join(f"{i + 1}. {t[:200]}" for i, t in enumerate(texts))
+    return (
+        "유튜브 댓글 여론 분석 작업입니다. 아래 번호가 매겨진 댓글을 분석해 "
+        "JSON 배열만 출력하세요. JSON 외 다른 텍스트는 금지합니다.\n\n"
+        '각 댓글마다 객체 하나: {"i": 댓글번호(정수), "s": 감성, "c": 분류, "k": 키워드}\n'
+        f"- s: {labels} 중 하나\n"
+        "- c: 댓글 주제를 나타내는 2~8자 한국어 명사구 (예: 연금개혁, 기금운용, 인물평가). "
+        f'광고·홍보·도배성 댓글은 반드시 "{Config.AD_LABEL}"으로 분류\n'
+        "- k: 핵심 키워드 1개 (한국어, 10자 이내)\n"
+        f"1번부터 {len(texts)}번까지 모든 댓글을 빠짐없이 분석하세요.\n\n"
+        f"[댓글 목록]\n{lines}"
+    )
 
-def _parse(text: str) -> pd.DataFrame:
-    text  = re.sub(r"```[a-z]*", "", text).replace("```", "").strip()
-    match = re.search(r"감성\s*\|\s*분류", text)
-    if not match: return pd.DataFrame()
+def _parse_batch(raw: str, texts: list[str]) -> list[dict]:
+    """모델 응답(JSON 배열)을 파싱해 원문 댓글과 인덱스로 조인한다."""
+    raw = re.sub(r"```[a-z]*", "", raw).replace("```", "").strip()
+    m = re.search(r"\[.*\]", raw, re.S)
+    if not m:
+        return []
     try:
-        df = pd.read_csv(io.StringIO(text[match.start():]),
-                         sep="|", on_bad_lines="skip", engine="python", dtype=str)
-    except Exception: return pd.DataFrame()
-    df.columns = [c.strip() for c in df.columns]
-    if not {"감성","분류","키워드","댓글내용"}.issubset(df.columns): return pd.DataFrame()
-    df = df[["감성","분류","키워드","댓글내용"]].copy().dropna(subset=["감성","분류"])
-    df["감성"] = df["감성"].str.strip()
-    df.loc[~df["감성"].isin(set(Config.SENTIMENT_LABELS)), "감성"] = "중립"
-    return df[df["댓글내용"].str.strip().str.len() > 0].reset_index(drop=True)
+        items = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(items, list):
+        return []
+    rows = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            idx = int(it.get("i")) - 1
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= idx < len(texts):
+            continue
+        s = str(it.get("s", "")).strip()
+        rows.append({
+            "감성":   s if s in Config.SENTIMENT_LABELS else "중립",
+            "분류":   str(it.get("c", "")).strip() or "기타",
+            "키워드": str(it.get("k", "")).strip(),
+            "댓글내용": texts[idx],
+        })
+    return rows
 
-def _call_api(prompt: str) -> tuple:
-    client, last = _gemini_client(), "실패"
-    for m in Config.GEMINI_MODEL_PRIORITY:
+def _call_api(prompt: str) -> tuple[str | None, str | None]:
+    """모델 우선순위에 따라 호출. 반환: (응답 텍스트, 오류 메시지)."""
+    client, last_err = _gemini_client(), "호출 실패"
+    cfg = genai_types.GenerateContentConfig(
+        response_mime_type="application/json",
+        temperature=0.2,
+    )
+    for model in Config.GEMINI_MODEL_PRIORITY:
         for attempt in range(Config.MAX_RETRIES):
             try:
-                r = client.models.generate_content(model=m, contents=prompt)
-                return r.text, m, None
+                r = client.models.generate_content(
+                    model=model, contents=prompt, config=cfg)
+                if r.text:
+                    return r.text, None
+                last_err = f"[{model}] 빈 응답"
+                break
             except Exception as e:
-                last = f"[{m}] {e}"
-                if _is_quota(e) or _is_404(e): break
-                if attempt < Config.MAX_RETRIES - 1: time.sleep(Config.RETRY_WAIT)
-    return None, None, last
+                last_err = f"[{model}] {e}"
+                if _is_quota(e) or _is_unavailable(e):
+                    break   # 다음 모델로 폴백
+                if attempt < Config.MAX_RETRIES - 1:
+                    time.sleep(Config.RETRY_WAIT)
+    return None, last_err
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _run_batches(h: str, texts: list) -> tuple:
-    batches = [texts[i:i+Config.BATCH_SIZE]
+def analyze_comments(cache_key: str, _texts: tuple[str, ...]) -> tuple[pd.DataFrame, list[str]]:
+    """cache_key(댓글 해시)로만 캐싱하고 _texts는 해싱에서 제외한다."""
+    texts = list(_texts)
+    batches = [texts[i:i + Config.BATCH_SIZE]
                for i in range(0, len(texts), Config.BATCH_SIZE)]
-    results, errors = [], []
+    rows, errors = [], []
     for idx, batch in enumerate(batches):
-        raw, model, err = _call_api(_prompt(batch))
-        if raw:
-            results.append((raw, model))
-            if idx < len(batches) - 1: time.sleep(1)
-        else:
-            errors.append(f"배치 {idx+1}: {err}")
-    return results, errors
-
-def analyze(h: str, texts: list) -> pd.DataFrame:
-    raw_results, errors = _run_batches(h, texts)
-    if errors:
-        with st.expander("⚠️ 오류 상세", expanded=False):
-            for e in errors: st.code(e)
-    frames = [_parse(r) for r, _ in raw_results]
-    frames = [f for f in frames if not f.empty]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        raw, err = _call_api(_build_prompt(batch))
+        if raw is None:
+            errors.append(f"배치 {idx + 1}/{len(batches)}: {err}")
+            continue
+        parsed = _parse_batch(raw, batch)
+        if not parsed:
+            errors.append(f"배치 {idx + 1}/{len(batches)}: 응답 파싱 실패")
+        rows.extend(parsed)
+        if idx < len(batches) - 1:
+            time.sleep(1)
+    if not rows:
+        return pd.DataFrame(), errors
+    df = (pd.DataFrame(rows)
+          .drop_duplicates(subset="댓글내용")
+          .reset_index(drop=True))
+    return df, errors
 
 
 # ============================================================
@@ -503,24 +561,30 @@ def analyze(h: str, texts: list) -> pd.DataFrame:
 # ============================================================
 def merge_topics(df: pd.DataFrame) -> pd.DataFrame:
     counts = df["분류"].value_counts()
-    if len(counts) <= Config.MAX_TOPICS: return df.copy()
-    top = counts.iloc[:Config.MAX_TOPICS - 1].index.tolist()
+    if len(counts) <= Config.MAX_TOPICS:
+        return df.copy()
+    top = set(counts.iloc[:Config.MAX_TOPICS - 1].index)
     out = df.copy()
-    out["분류"] = out["분류"].apply(lambda x: x if x in top else "기타")
+    out["분류"] = out["분류"].where(out["분류"].isin(top), "기타")
     return out
 
 
 # ============================================================
 # 7. 차트
 # ============================================================
-def chart_donut(res_df: pd.DataFrame) -> go.Figure:
-    # 광고성 댓글 제외 (분류='광고/홍보')
-    df = res_df[res_df["분류"] != "광고/홍보"].copy()
-    sc = df["감성"].value_counts().reset_index()
-    sc.columns = ["감성", "n"]
-    colors = [Config.SENTIMENT_COLORS.get(s, "#ccc") for s in sc["감성"]]
+def chart_donut(res_df: pd.DataFrame) -> go.Figure | None:
+    df = res_df[res_df["분류"] != Config.AD_LABEL]
+    if df.empty:
+        df = res_df
+    if df.empty:
+        return None
+    sc = (df["감성"].value_counts()
+          .reindex(Config.SENTIMENT_LABELS)
+          .dropna()
+          .astype(int))
+    colors = [Config.SENTIMENT_COLORS.get(s, "#ccc") for s in sc.index]
     fig = go.Figure(go.Pie(
-        labels=sc["감성"], values=sc["n"], hole=0.50,
+        labels=sc.index.tolist(), values=sc.values.tolist(), hole=0.50,
         marker=dict(colors=colors, line=dict(color="#fff", width=2)),
         textinfo="percent", textposition="inside",
         textfont=dict(size=13, color="#fff"),
@@ -539,14 +603,16 @@ def chart_donut(res_df: pd.DataFrame) -> go.Figure:
     )
     return fig
 
-def chart_topic_bar(res_df: pd.DataFrame) -> go.Figure:
+def chart_topic_bar(res_df: pd.DataFrame) -> go.Figure | None:
+    if res_df.empty:
+        return None
     df    = merge_topics(res_df)
-    bd    = df.groupby(["분류","감성"]).size().reset_index(name="n")
+    bd    = df.groupby(["분류", "감성"]).size().reset_index(name="n")
     order = bd.groupby("분류")["n"].sum().sort_values(ascending=True).index.tolist()
     fig   = px.bar(bd, x="n", y="분류", color="감성", orientation="h",
                    color_discrete_map=Config.SENTIMENT_COLORS,
-                   category_orders={"분류": order, "감성": ["중립","부정","긍정"]},
-                   labels={"n":"","분류":""},
+                   category_orders={"분류": order, "감성": ["중립", "부정", "긍정"]},
+                   labels={"n": "", "분류": ""},
                    height=max(220, len(order) * 44))
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -564,85 +630,72 @@ def chart_topic_bar(res_df: pd.DataFrame) -> go.Figure:
     fig.update_traces(marker_line_width=0)
     return fig
 
-def fetch_view_history(info: dict) -> pd.DataFrame:
-    # published는 UTC timezone 포함 → UTC로 파싱 후 tz 제거
-    pub_raw      = pd.to_datetime(info["published"], utc=True).tz_localize(None)
-    pub_day      = pub_raw.normalize()
-    now          = pd.Timestamp.now()   # tz-naive (로컬)
-    today        = now.normalize()
-    total        = int(info["view_count"])
-    days_elapsed = int((today - pub_day).days)
+def build_view_curve(info: dict) -> pd.DataFrame:
+    """게재 시점~현재의 누적 조회수 추정 곡선.
+
+    YouTube Data API는 조회수 이력을 제공하지 않으므로 현재 총 조회수를
+    지수 포화 곡선(1-e^-kf)으로 배분한 '추정치'다. 실측 데이터가 아니다.
+    """
+    pub   = pd.to_datetime(info["published"], utc=True).tz_convert(KST).tz_localize(None)
+    now   = pd.Timestamp.now(tz=KST).tz_localize(None)
+    total = int(info["view_count"])
+    if total <= 0 or now <= pub:
+        return pd.DataFrame()
+
+    day1 = pub.normalize() + pd.Timedelta(days=1)   # 게재 다음날 0시
+    stamps = list(pd.date_range(pub.floor("h"), min(day1, now), freq="h"))
+    if now > day1:
+        stamps += list(pd.date_range(day1 + pd.Timedelta(days=1),
+                                     now.normalize(), freq="D"))
+    stamps.append(now)
+    stamps = sorted(set(stamps))
+
+    span  = (now - pub).total_seconds()
+    k     = 4.0
+    denom = 1.0 - math.exp(-k)
     rows = []
-
-    # 당일: 시간 단위
-    day0_end   = pub_day + pd.Timedelta(days=1)
-    hour_end   = min(day0_end, now)
-    hour_range = pd.date_range(pub_raw.floor("h"), hour_end, freq="h")
-    if len(hour_range) < 2:
-        hour_range = pd.DatetimeIndex([pub_raw.floor("h"), hour_end])
-    n_h = len(hour_range)
-    if days_elapsed == 0:
-        end_v = total
-    else:
-        n_t = days_elapsed + 1
-        x_a = np.linspace(0.0, 4.0, n_t); w_a = 1.0 - np.exp(-x_a); w_a /= w_a[-1]
-        end_v = max(int(round(float(w_a[0]) * total)), 1)
-    x_h = np.linspace(0.0, 2.0, n_h); w_h = 1.0 - np.exp(-x_h)
-    w_h = w_h / w_h[-1] if w_h[-1] > 0 else np.linspace(0.0, 1.0, n_h)
-    for ts, wv in zip(hour_range, w_h):
-        rows.append({"date": ts, "views": int(round(float(wv)*end_v)), "is_hourly": True})
-
-    # 다음날~오늘: 일 단위
-    if days_elapsed >= 1:
-        day1 = pub_day + pd.Timedelta(days=1)
-        day_range = pd.date_range(day1, today, freq="D").tolist()
-        n_t = days_elapsed + 1
-        x_a = np.linspace(0.0, 4.0, n_t); w_a = 1.0 - np.exp(-x_a); w_a /= w_a[-1]
-        for i, ts in enumerate(day_range):
-            rows.append({"date": ts, "views": int(round(float(w_a[i+1])*total)),
-                         "is_hourly": False})
-    df = pd.DataFrame(rows); df["date"] = pd.to_datetime(df["date"])
-    return df
+    for ts in stamps:
+        f = min(max((ts - pub).total_seconds() / span, 0.0), 1.0)
+        views = int(round(total * (1.0 - math.exp(-k * f)) / denom))
+        rows.append({"date": ts, "views": views, "is_hourly": ts < day1})
+    return pd.DataFrame(rows)
 
 def chart_view_trend(info: dict) -> go.Figure | None:
-    import math
-    df = fetch_view_history(info)
-    if df.empty or len(df) < 2: return None
+    df = build_view_curve(info)
+    if len(df) < 2:
+        return None
     total     = int(info["view_count"])
     span_days = int((df["date"].iloc[-1] - df["date"].iloc[0]).days)
-    if total > 0:
-        mag = 10 ** math.floor(math.log10(total))
-        max_v = math.ceil(total / mag) * mag
-        if max_v == total: max_v = int(total * 1.2)
-    else:
-        max_v = 10_000
-    raw_t = max_v / 5
-    mag2  = 10 ** math.floor(math.log10(max(raw_t, 1)))
+
+    mag   = 10 ** math.floor(math.log10(total))
+    max_v = math.ceil(total / mag) * mag
+    if max_v == total:
+        max_v = int(total * 1.2)
+    raw_t  = max_v / 5
+    mag2   = 10 ** math.floor(math.log10(max(raw_t, 1)))
     y_tick = math.ceil(raw_t / mag2) * mag2
 
-    if span_days <= 3:   x_dtick, x_fmt = 3600000*6, "%m/%d %H시"
-    elif span_days <= 14: x_dtick, x_fmt = 86400000, "%m/%d"
-    elif span_days <= 60: x_dtick, x_fmt = 86400000*3, "%m/%d"
-    elif span_days <= 365: x_dtick, x_fmt = 86400000*7, "%m/%d"
-    else: x_dtick, x_fmt = "M1", "%Y-%m"
+    if span_days <= 3:     x_dtick, x_fmt = 3600000 * 6,  "%m/%d %H시"
+    elif span_days <= 14:  x_dtick, x_fmt = 86400000,     "%m/%d"
+    elif span_days <= 60:  x_dtick, x_fmt = 86400000 * 3, "%m/%d"
+    elif span_days <= 365: x_dtick, x_fmt = 86400000 * 7, "%m/%d"
+    else:                  x_dtick, x_fmt = "M1",         "%Y-%m"
 
-    hover_texts = []
-    for _, row in df.iterrows():
-        ts = row["date"]
-        hover_texts.append(
-            f"{ts.month}월 {ts.day}일 {ts.hour:02d}:00" if row["is_hourly"]
-            else f"{ts.year}년 {ts.month}월 {ts.day}일"
-        )
+    hover_texts = [
+        f"{ts.month}월 {ts.day}일 {ts.hour:02d}:00" if hourly
+        else f"{ts.year}년 {ts.month}월 {ts.day}일"
+        for ts, hourly in zip(df["date"], df["is_hourly"])
+    ]
     fig = go.Figure(go.Scatter(
         x=df["date"], y=df["views"], mode="lines",
         line=dict(color="#1f77b4", width=2.5),
         text=hover_texts, customdata=df["views"].tolist(),
-        hovertemplate="<b>%{text}</b><br>누적 조회수: <b>%{customdata:,}회</b><extra></extra>",
+        hovertemplate="<b>%{text}</b><br>누적 조회수(추정): <b>%{customdata:,}회</b><extra></extra>",
         hoverlabel=dict(bgcolor="#1c2333",
                         font=dict(color="#fff", size=12), bordercolor="#1c2333"),
     ))
-    x_start = str((df["date"].iloc[0]  - pd.Timedelta(hours=6)).isoformat())
-    x_end   = str((df["date"].iloc[-1] + pd.Timedelta(hours=6)).isoformat())
+    x_start = (df["date"].iloc[0]  - pd.Timedelta(hours=6)).isoformat()
+    x_end   = (df["date"].iloc[-1] + pd.Timedelta(hours=6)).isoformat()
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
@@ -664,12 +717,14 @@ def render_table(filtered: pd.DataFrame, total_count: int) -> None:
     rows_html = ""
     for _, row in filtered.iterrows():
         css     = Config.SENTIMENT_CSS.get(row["감성"], "s-neu")
-        content = str(row["댓글내용"])
+        topic   = html.escape(str(row["분류"]))
+        keyword = html.escape(str(row["키워드"])[:14])
+        content = html.escape(str(row["댓글내용"]))
         rows_html += f"""
         <tr>
           <td style="width:52px"><span class="{css}">{row['감성']}</span></td>
-          <td style="width:72px"><span class="tag">{str(row['분류'])}</span></td>
-          <td style="width:72px"><strong style="font-size:0.72rem">{str(row['키워드'])[:14]}</strong></td>
+          <td style="width:72px"><span class="tag">{topic}</span></td>
+          <td style="width:72px"><strong style="font-size:0.72rem">{keyword}</strong></td>
           <td><div class="comment-text">{content}</div></td>
         </tr>"""
 
@@ -681,9 +736,9 @@ def render_table(filtered: pd.DataFrame, total_count: int) -> None:
     </div>
     <table class="data-table">
       <thead><tr>
-        <th style="width:52px">감성 ↕</th>
-        <th style="width:72px">분류 ↕</th>
-        <th style="width:72px">키워드 ↕</th>
+        <th style="width:52px">감성</th>
+        <th style="width:72px">분류</th>
+        <th style="width:72px">키워드</th>
         <th>댓글 내용</th>
       </tr></thead>
     </table>
@@ -698,52 +753,71 @@ def render_table(filtered: pd.DataFrame, total_count: int) -> None:
 # ============================================================
 # 9. 메인
 # ============================================================
+def load_data(vid: str) -> bool:
+    """수집 + 분석 결과를 session_state에 채운다. 성공 시 True."""
+    if all(k in st.session_state for k in ("info", "res_df")):
+        return True
+
+    with st.spinner("📡 데이터 수집 중..."):
+        info = fetch_video_info(vid)
+        if not info:
+            return False
+        raw_df, err = fetch_comments(vid)
+    if raw_df.empty:
+        st.error(f"❌ 댓글 수집 실패: {err or '수집된 댓글이 없습니다.'}")
+        return False
+
+    texts   = tuple(raw_df["text"])
+    h       = hashlib.md5("\x1f".join(texts).encode()).hexdigest()
+    n_batch = -(-len(texts) // Config.BATCH_SIZE)
+    with st.spinner(f"🤖 AI 분석 중 ({len(texts)}개 댓글, {n_batch}배치)..."):
+        res_df, errors = analyze_comments(h, texts)
+
+    if errors:
+        with st.expander("⚠️ 분석 오류 상세", expanded=False):
+            for e in errors:
+                st.code(e)
+    if res_df.empty:
+        st.error("❌ AI 분석에 실패했습니다. 잠시 후 재분석해 주세요.")
+        return False
+
+    st.session_state["info"]   = info
+    st.session_state["raw_df"] = raw_df
+    st.session_state["res_df"] = res_df
+    return True
+
+
 def main():
     vid = extract_video_id(TARGET_URL)
     if not vid:
-        st.error("❌ TARGET_URL이 유효하지 않습니다."); return
-
-    # ── session_state 캐싱 ──────────────────────────────────
-    col_sp, col_btn = st.columns([5, 1])
-    with col_btn:
-        if st.button("🔄 재분석"):
-            for k in ["info","raw_df","res_df"]:
-                st.session_state.pop(k, None)
-            st.cache_data.clear()
-
-    if any(k not in st.session_state for k in ["info","raw_df","res_df"]):
-        with st.spinner("📡 데이터 수집 중..."):
-            info   = fetch_video_info(vid)
-            raw_df = fetch_comments(vid)
-        if not info: return
-        if raw_df.empty: st.error("❌ 댓글 수집 실패"); return
-
-        n_batch = (len(raw_df) + Config.BATCH_SIZE - 1) // Config.BATCH_SIZE
-        with st.spinner(f"🤖 AI 분석 중 ({len(raw_df)}개, {n_batch}배치)..."):
-            h      = hashlib.md5("".join(raw_df["text"].tolist()).encode()).hexdigest()
-            res_df = analyze(h, raw_df["text"].tolist())
-        if res_df.empty: st.error("❌ AI 분석 실패"); return
-
-        st.session_state["info"]   = info
-        st.session_state["raw_df"] = raw_df
-        st.session_state["res_df"] = res_df
-    else:
-        info   = st.session_state["info"]
-        raw_df = st.session_state["raw_df"]
-        res_df = st.session_state["res_df"]
+        st.error("❌ TARGET_URL이 유효하지 않습니다.")
+        return
 
     # ── 상단 다크 헤더 ─────────────────────────────────────
     st.markdown('<div class="top-header">국민연금 이사장 유튜브 여론 모니터링</div>',
                 unsafe_allow_html=True)
 
+    # ── 재분석 버튼 ────────────────────────────────────────
+    _, col_btn = st.columns([4, 1])
+    with col_btn:
+        if st.button("🔄 재분석"):
+            for k in ("info", "raw_df", "res_df"):
+                st.session_state.pop(k, None)
+            st.cache_data.clear()
+
+    if not load_data(vid):
+        return
+    info   = st.session_state["info"]
+    res_df = st.session_state["res_df"]
+
     # ── 영상 정보 카드 ─────────────────────────────────────
-    pub_dt  = pd.to_datetime(info["published"], utc=True).tz_localize(None)
+    pub_dt  = pd.to_datetime(info["published"], utc=True).tz_convert(KST)
     pub_str = pub_dt.strftime("%Y-%m-%d %H:%M:%S")
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     st.markdown(f"""
     <div class="video-card">
-        <div class="vc-channel">{info['channel']} · {pub_dt.strftime('%Y%m%d')}</div>
-        <div class="vc-title">{info['title']}</div>
+        <div class="vc-channel">{html.escape(info['channel'])} · {pub_dt.strftime('%Y%m%d')}</div>
+        <div class="vc-title">{html.escape(info['title'])}</div>
         <div class="vc-meta">
             영상 게재 시점 &nbsp;<span>{pub_str}</span><br>
             최종 업데이트 &nbsp;<span>{now_str}</span><br>
@@ -752,10 +826,7 @@ def main():
     </div>""", unsafe_allow_html=True)
 
     # ── 메트릭 2×2 ─────────────────────────────────────────
-    # 광고성 제외 분석 댓글 수
-    ad_excluded = res_df[res_df["분류"] != "광고/홍보"]
-    analyzed_n  = len(ad_excluded)
-
+    analyzed_n = int((res_df["분류"] != Config.AD_LABEL).sum())
     st.markdown(f"""
     <div class="metric-grid">
         <div class="metric-card">
@@ -775,34 +846,40 @@ def main():
         </div>
         <div class="metric-card">
             <div class="mc-label">분석 댓글 수</div>
-            <div class="mc-value">{analyzed_n}</div>
+            <div class="mc-value">{analyzed_n:,}</div>
             <div class="mc-sub">광고 제외 기준</div>
         </div>
     </div>""", unsafe_allow_html=True)
 
-    # ── 시간대별 누적 조회수 추이 ───────────────────────────
+    # ── 시간대별 누적 조회수 추이 (추정) ────────────────────
     vt = chart_view_trend(info)
     if vt:
-        st.markdown('<div class="section-card"><div class="section-title">시간대별 누적 조회수 추이</div>',
+        st.markdown('<div class="section-card">'
+                    '<div class="section-title">시간대별 누적 조회수 추이</div>'
+                    '<div class="section-sub">현재 총 조회수를 기반으로 한 추정 곡선입니다 (실측 이력 아님).</div>',
                     unsafe_allow_html=True)
         st.plotly_chart(vt, width="stretch", config={"displayModeBar": False})
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ── 전체 감성 분포 ──────────────────────────────────────
-    st.markdown('<div class="section-card"><div class="section-title">전체 감성 분포</div>'
-                '<div class="section-sub">광고성 댓글을 제외한 감성 분포를 보여줍니다.</div>',
-                unsafe_allow_html=True)
-    st.plotly_chart(chart_donut(res_df), width="stretch",
-                    config={"displayModeBar": False})
-    st.markdown('</div>', unsafe_allow_html=True)
+    donut = chart_donut(res_df)
+    if donut:
+        st.markdown('<div class="section-card">'
+                    '<div class="section-title">전체 감성 분포</div>'
+                    '<div class="section-sub">광고성 댓글을 제외한 감성 분포를 보여줍니다.</div>',
+                    unsafe_allow_html=True)
+        st.plotly_chart(donut, width="stretch", config={"displayModeBar": False})
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # ── 분류별 여론 ────────────────────────────────────────
-    st.markdown('<div class="section-card"><div class="section-title">분류별 여론</div>'
-                '<div class="section-sub">주요 분류별 댓글 반응을 감성 기준으로 나누어 보여줍니다.</div>',
-                unsafe_allow_html=True)
-    st.plotly_chart(chart_topic_bar(res_df), width="stretch",
-                    config={"displayModeBar": False})
-    st.markdown('</div>', unsafe_allow_html=True)
+    topic_bar = chart_topic_bar(res_df)
+    if topic_bar:
+        st.markdown('<div class="section-card">'
+                    '<div class="section-title">분류별 여론</div>'
+                    '<div class="section-sub">주요 분류별 댓글 반응을 감성 기준으로 나누어 보여줍니다.</div>',
+                    unsafe_allow_html=True)
+        st.plotly_chart(topic_bar, width="stretch", config={"displayModeBar": False})
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # ── 전체 분석 데이터 (고정 헤더 + 스크롤) ──────────────
     with st.container(border=True):
@@ -810,15 +887,14 @@ def main():
         with col_f:
             sel = st.selectbox("감성 필터", ["전체"] + Config.SENTIMENT_LABELS,
                                label_visibility="collapsed")
+        filtered = res_df if sel == "전체" else res_df[res_df["감성"] == sel]
         with col_dl:
-            filtered = res_df if sel == "전체" else res_df[res_df["감성"] == sel]
             st.download_button(
                 "⬇️ CSV",
                 filtered.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"analysis_{vid}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                file_name=f"analysis_{vid}_{datetime.now(KST).strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv",
             )
-        filtered = res_df if sel == "전체" else res_df[res_df["감성"] == sel]
         render_table(filtered, len(filtered))
 
     # ── 면책조항 ───────────────────────────────────────────
@@ -827,6 +903,7 @@ def main():
         <div class="d-title">면책조항</div>
         <ul>
             <li>본 대시보드의 수치는 유튜브 API 수집 시점 기준이며, 실제 서비스 화면과 차이가 있을 수 있습니다.</li>
+            <li>조회수 추이 그래프는 현재 총 조회수 기반 추정 곡선으로, 실제 시간대별 이력과 다릅니다.</li>
             <li>댓글 감성 및 주제 분류 결과는 AI 자동 분석 결과로, 실제 작성자의 의도와 다를 수 있습니다.</li>
             <li>분석 결과는 참고용이며, 정책 판단이나 대외 커뮤니케이션에는 추가 검토가 필요합니다.</li>
         </ul>

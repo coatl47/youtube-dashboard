@@ -558,9 +558,10 @@ def chart_topic_bar(res_df: pd.DataFrame) -> go.Figure:
     return fig
 
 def fetch_view_history(info: dict) -> pd.DataFrame:
-    pub_raw      = pd.to_datetime(info["published"])
+    # published는 UTC timezone 포함 → UTC로 파싱 후 tz 제거
+    pub_raw      = pd.to_datetime(info["published"], utc=True).tz_localize(None)
     pub_day      = pub_raw.normalize()
-    now          = pd.Timestamp.now().tz_localize(None)
+    now          = pd.Timestamp.now()   # tz-naive (로컬)
     today        = now.normalize()
     total        = int(info["view_count"])
     days_elapsed = int((today - pub_day).days)
@@ -729,7 +730,7 @@ def main():
                 unsafe_allow_html=True)
 
     # ── 영상 정보 카드 ─────────────────────────────────────
-    pub_dt  = pd.to_datetime(info["published"])
+    pub_dt  = pd.to_datetime(info["published"], utc=True).tz_localize(None)
     pub_str = pub_dt.strftime("%Y-%m-%d %H:%M:%S")
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.markdown(f"""

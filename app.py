@@ -170,14 +170,14 @@ footer { display: none !important; }
     font-size:0.7rem; white-space:nowrap;
 }
 
-/* ── 댓글 내용 말줄임 ── */
+/* ── 댓글 내용 전체 표시 ── */
 .comment-text {
     max-width: 280px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: #444;
     font-size: 0.78rem;
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: normal;
 }
 
 /* ── selectbox ── */
@@ -744,14 +744,14 @@ def main():
         filtered  = res_df if sel == "전체" else res_df[res_df["감성"] == sel]
         rows_html = ""
         for _, row in filtered.iterrows():
-            css = Config.SENTIMENT_CSS.get(row["감성"], "s-neu")
-            content = str(row["댓글내용"])[:60]
+            css     = Config.SENTIMENT_CSS.get(row["감성"], "s-neu")
+            content = str(row["댓글내용"])
             rows_html += f"""
             <tr>
                 <td><span class="{css}">{row['감성']}</span></td>
                 <td><span class="tag">{str(row['분류'])}</span></td>
                 <td><strong>{str(row['키워드'])[:18]}</strong></td>
-                <td><div class="comment-text" title="{content}">{content}</div></td>
+                <td><div class="comment-text">{content}</div></td>
             </tr>"""
 
         st.markdown(f"""

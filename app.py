@@ -711,21 +711,21 @@ def main():
         with st.container(border=True):
             st.markdown('<div class="card-title">📈 시간대별 누적 조회수 추이</div>',
                         unsafe_allow_html=True)
-            st.plotly_chart(vt, use_container_width=True,
+            st.plotly_chart(vt, width="stretch",
                             config={"displayModeBar": False})
 
     # ════ 😊 감성 분포 ══════════════════════════════════════
     with st.container(border=True):
         st.markdown('<div class="card-title">😊 전체 감성 분포</div>',
                     unsafe_allow_html=True)
-        st.plotly_chart(chart_donut(res_df), use_container_width=True,
+        st.plotly_chart(chart_donut(res_df), width="stretch",
                         config={"displayModeBar": False})
 
     # ════ 📊 분류별 여론 ════════════════════════════════════
     with st.container(border=True):
         st.markdown('<div class="card-title">📊 분류별 여론 (긍정/부정/중립)</div>',
                     unsafe_allow_html=True)
-        st.plotly_chart(chart_topic_bar(res_df), use_container_width=True,
+        st.plotly_chart(chart_topic_bar(res_df), width="stretch",
                         config={"displayModeBar": False})
 
     # ════ 📝 전체 분석 데이터 ═══════════════════════════════

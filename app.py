@@ -1,6 +1,9 @@
 """
-유튜브 여론 분석 대시보드
-디자인: roy8in.github.io/youtube-comment-monitoring 1:1 재현
+유튜브 여론 분석 대시보드 — 최적화 버전
+개선사항:
+  1. 댓글 샘플링: 인기 100개 + 최신 100개 혼합 (최대 200개, 999개 영상 대응)
+  2. session_state 캐싱: 재렌더링 시 API 재호출 없음 + 수동 재분석 버튼
+  3. CSS 디자인 정제: 카드 간격·폰트·테이블 가독성 개선
 """
 
 import io
@@ -43,9 +46,9 @@ html, body, [class*="css"] {
 [data-testid="stToolbar"] { display: none !important; }
 footer { display: none !important; }
 
-/* ── 메인 컨테이너 중앙 정렬 ── */
+/* ── 메인 컨테이너 ── */
 .block-container {
-    max-width: 820px !important;
+    max-width: 860px !important;
     padding: 2rem 1.5rem !important;
     margin: 0 auto !important;
 }
@@ -56,128 +59,167 @@ footer { display: none !important; }
     font-size: 1.5rem;
     font-weight: 700;
     color: #31333f;
-    margin-bottom: 1rem;
+    margin-bottom: 1.2rem;
+    letter-spacing: -0.01em;
+}
+
+/* ── 재분석 버튼 ── */
+.stButton > button {
+    background: #fff !important;
+    color: #555 !important;
+    border: 1px solid #d9d9d9 !important;
+    border-radius: 6px !important;
+    font-size: 0.8rem !important;
+    font-weight: 500 !important;
+    padding: 0.35rem 0.9rem !important;
+}
+.stButton > button:hover {
+    border-color: #1f77b4 !important;
+    color: #1f77b4 !important;
 }
 
 /* ── 영상 제목 박스 ── */
 .video-box {
-    border: 1px solid #d9d9d9;
-    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
     background: #fff;
-    padding: 0.7rem 1rem;
+    padding: 0.85rem 1.1rem;
     text-align: center;
-    margin-bottom: 1.2rem;
-    font-size: 0.85rem;
+    margin-bottom: 1rem;
 }
-.video-box .vb-label {
-    font-size: 0.7rem;
-    color: #999;
-    margin-bottom: 0.2rem;
-}
-.video-box .vb-title { color: #31333f; font-weight: 500; }
+.video-box .vb-label { font-size: 0.68rem; color: #aaa; margin-bottom: 0.25rem; }
+.video-box .vb-title { font-size: 0.9rem; color: #31333f; font-weight: 500; line-height: 1.5; }
 
 /* ── 메트릭 4칸 ── */
 .metric-row {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 8px;
-    margin-bottom: 1.2rem;
+    margin-bottom: 1rem;
 }
 .metric-box {
     background: #fff;
     border-radius: 8px;
-    padding: 0.9rem 0.8rem;
+    padding: 0.9rem 0.6rem;
     text-align: center;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
 }
-.metric-box .m-label {
-    font-size: 0.68rem;
-    color: #999;
-    margin-bottom: 0.35rem;
-}
-.metric-box .m-val { font-size: 1.4rem; font-weight: 700; line-height: 1.1; }
+.metric-box .m-label { font-size: 0.65rem; color: #aaa; margin-bottom: 0.3rem; letter-spacing: 0.02em; }
+.metric-box .m-val   { font-size: 1.35rem; font-weight: 700; line-height: 1.1; }
 .metric-box .m-val.blue  { color: #1f77b4; }
 .metric-box .m-val.red   { color: #d62728; }
-.metric-box .m-val.small { font-size: 0.78rem; font-weight: 400; color: #555; line-height: 1.7; }
+.metric-box .m-val.small { font-size: 0.75rem; font-weight: 400; color: #666; line-height: 1.7; }
 
-/* ── 카드 공통 ── */
-.card {
-    background: #fff;
-    border-radius: 10px;
-    padding: 1.1rem 1.3rem;
-    margin-bottom: 1.1rem;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+/* ── 샘플 정보 뱃지 ── */
+.sample-badge {
+    text-align: center;
+    font-size: 0.7rem;
+    color: #aaa;
+    margin-bottom: 1rem;
+    letter-spacing: 0.02em;
 }
-.card-title {
-    font-size: 0.9rem;
-    font-weight: 700;
-    color: #31333f;
-    margin-bottom: 0.7rem;
+.sample-badge span {
+    background: #f0f2f6;
+    border: 1px solid #e0e0e0;
+    border-radius: 12px;
+    padding: 2px 10px;
+    margin: 0 3px;
 }
 
-/* ── st.container(border=True) 카드 스타일 ── */
+/* ── st.container(border=True) 카드 ── */
 [data-testid="stVerticalBlockBorderWrapper"] {
     background: #fff !important;
     border-radius: 10px !important;
     border: none !important;
     box-shadow: 0 1px 4px rgba(0,0,0,0.07) !important;
-    padding: 0.3rem 0.5rem !important;
+    padding: 0.4rem 0.6rem 0.6rem !important;
     margin-bottom: 1rem !important;
 }
 
-/* ── 테이블 ── */
-.data-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
-.data-table th {
-    text-align:left; padding:0.5rem 0.6rem;
-    border-bottom:2px solid #eee; color:#666; font-weight:600;
-    white-space:nowrap;
+/* ── 카드 제목 ── */
+.card-title {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: #31333f;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid #f5f5f5;
 }
-.data-table td { padding:0.55rem 0.6rem; border-bottom:1px solid #f5f5f5; vertical-align:top; }
+
+/* ── 테이블 ── */
+.data-table { width:100%; border-collapse:collapse; font-size:0.8rem; }
+.data-table th {
+    text-align:left; padding:0.5rem 0.7rem;
+    border-bottom:2px solid #eee; color:#888;
+    font-weight:600; font-size:0.72rem;
+    letter-spacing:0.02em; white-space:nowrap;
+}
+.data-table td { padding:0.55rem 0.7rem; border-bottom:1px solid #f8f8f8; vertical-align:middle; }
 .data-table tr:last-child td { border-bottom:none; }
 .data-table tr:hover td { background:#fafafa; }
 
-/* 감성 텍스트 색상 */
-.s-pos { color:#2ca02c; font-weight:700; }
-.s-neg { color:#d62728; font-weight:700; }
-.s-neu { color:#1f77b4; font-weight:700; }
+/* 감성 텍스트 */
+.s-pos { color:#2ca02c; font-weight:700; font-size:0.8rem; }
+.s-neg { color:#d62728; font-weight:700; font-size:0.8rem; }
+.s-neu { color:#1f77b4; font-weight:700; font-size:0.8rem; }
 
 /* 분류 pill */
 .tag {
     display:inline-block; background:#f0f2f6; color:#555;
-    padding:2px 9px; border-radius:12px; font-size:0.72rem;
-    white-space:nowrap;
+    padding:2px 8px; border-radius:10px;
+    font-size:0.7rem; white-space:nowrap;
+}
+
+/* ── 댓글 내용 말줄임 ── */
+.comment-text {
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #444;
+    font-size: 0.78rem;
+}
+
+/* ── selectbox ── */
+[data-baseweb="select"] * { font-size:0.8rem !important; }
+
+/* ── 정렬 힌트 ── */
+.sort-hint { font-size:0.68rem; color:#bbb; text-align:right; margin-bottom:0.4rem; }
+
+/* ── 다운로드 버튼 ── */
+.stDownloadButton > button {
+    background: #fff !important;
+    border: 1px solid #d9d9d9 !important;
+    color: #555 !important;
+    border-radius: 6px !important;
+    font-size: 0.78rem !important;
+    padding: 0.35rem 0.9rem !important;
+}
+.stDownloadButton > button:hover {
+    border-color: #1f77b4 !important;
+    color: #1f77b4 !important;
 }
 
 /* ── 면책조항 ── */
 .disclaimer {
-    margin-top:0.5rem;
-    padding:1rem 1.2rem;
-    font-size:0.76rem;
-    color:#888;
-    line-height:1.9;
-    text-align:center;
+    margin-top: 0.5rem;
+    padding: 1rem 1.2rem;
+    font-size: 0.73rem;
+    color: #aaa;
+    line-height: 2;
+    text-align: center;
 }
-.disclaimer .d-title {
-    font-size:0.82rem; font-weight:700; color:#e65100; margin-bottom:0.4rem;
-}
+.disclaimer .d-title { font-size:0.8rem; font-weight:700; color:#e65100; margin-bottom:0.4rem; }
 .disclaimer ul { text-align:left; padding-left:1.2rem; margin:0; }
 
-/* ── selectbox ── */
-[data-baseweb="select"] * { font-size:0.82rem !important; }
-
-/* 정렬 버튼 텍스트 */
-.sort-hint {
-    font-size:0.7rem; color:#aaa; text-align:right; margin-bottom:0.3rem;
-}
-
-/* metric 컨테이너 숨김 (커스텀 HTML 사용) */
+/* metric 기본 숨김 */
 [data-testid="metric-container"] { display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# 1. CONFIG — 원본 사이트와 동일한 색상
+# 1. CONFIG
 # ============================================================
 class Config:
     GEMINI_MODEL_PRIORITY = [
@@ -185,29 +227,29 @@ class Config:
         "gemini-2.5-flash-lite",
         "gemini-2.0-flash",
     ]
-    COMMENT_LIMIT   = 40
+    # ① 샘플링: 인기 100 + 최신 100 = 최대 200개
+    SAMPLE_POPULAR = 100   # order="relevance" (인기순)
+    SAMPLE_RECENT  = 100   # order="time"      (최신순)
     COMMENT_MIN_LEN = 5
-    BATCH_SIZE      = 20
-    MAX_RETRIES     = 2
-    RETRY_WAIT      = 15
-    MAX_TOPICS      = 8
+
+    BATCH_SIZE  = 20
+    MAX_RETRIES = 2
+    RETRY_WAIT  = 15
+    MAX_TOPICS  = 8
 
     SENTIMENT_LABELS = ["긍정", "부정", "중립"]
-    # 스크린샷 색상: 긍정=초록, 부정=주황빨강, 중립=파랑
-    SENTIMENT_COLORS = {
-        "긍정": "#2ca02c",
-        "부정": "#d62728",
-        "중립": "#1f77b4",
-    }
-    SENTIMENT_CSS = {
-        "긍정": "s-pos",
-        "부정": "s-neg",
-        "중립": "s-neu",
-    }
+    SENTIMENT_COLORS = {"긍정": "#2ca02c", "부정": "#d62728", "중립": "#1f77b4"}
+    SENTIMENT_CSS    = {"긍정": "s-pos",   "부정": "s-neg",   "중립": "s-neu"}
 
 
 # ============================================================
-# 2. Gemini
+# 2. 분석 대상 영상 (URL만 변경하면 됩니다)
+# ============================================================
+TARGET_URL = "https://www.youtube.com/watch?v=fNHLffyXnQM&t=3s"
+
+
+# ============================================================
+# 3. Gemini 클라이언트
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def _gemini_client():
@@ -223,7 +265,7 @@ def _is_404(e):
 
 
 # ============================================================
-# 3. YouTube
+# 4. YouTube 데이터
 # ============================================================
 @st.cache_resource
 def _yt():
@@ -238,9 +280,9 @@ def extract_video_id(url: str) -> str | None:
         if m: return m.group(1)
     return None
 
+
 @st.cache_data(ttl=600, show_spinner=False)
-def _fetch_video_info_cached(vid: str) -> dict | None:
-    """캐시 함수 — st.* 호출 없음."""
+def _fetch_info_cached(vid: str) -> dict:
     try:
         r = _yt().videos().list(part="snippet,statistics", id=vid).execute()
         if not r.get("items"):
@@ -261,253 +303,81 @@ def _fetch_video_info_cached(vid: str) -> dict | None:
 
 
 def fetch_video_info(vid: str) -> dict | None:
-    """UI 오류 표시 담당."""
-    result = _fetch_video_info_cached(vid)
-    if result is None:
-        st.error("❌ 응답이 없습니다.")
-        return None
+    result = _fetch_info_cached(vid)
+    if not result:
+        st.error("❌ 응답 없음"); return None
     err = result.get("error")
-    if not err:
-        return result
-    # 오류 유형별 안내
-    if err == "not_found":
-        st.error("❌ 영상을 찾을 수 없습니다. 비공개 또는 삭제된 영상입니다.")
-    elif err == "http_400":
-        st.error(f"❌ 잘못된 요청 (400). Video ID를 확인하세요.\n\n{result.get('detail','')}")
-    elif err == "http_403":
-        st.error(
-            "❌ YouTube API 키 오류 (403)\n\n"
-            "**원인:** API 키가 없거나 잘못되었거나, 일일 할당량이 초과되었습니다.\n\n"
-            "**확인:** Streamlit Cloud → 앱 Settings → Secrets → `YOUTUBE_API_KEY` 값을 확인하세요."
-        )
-    elif err == "http_404":
-        st.error("❌ 영상을 찾을 수 없습니다 (404).")
-    else:
-        st.error(f"❌ 오류 발생: {result.get('detail', err)}")
+    if not err: return result
+    msgs = {
+        "not_found": "❌ 영상을 찾을 수 없습니다 (비공개/삭제).",
+        "http_403":  "❌ YouTube API 키 오류(403) — Secrets의 YOUTUBE_API_KEY를 확인하세요.",
+        "http_404":  "❌ 영상 없음 (404).",
+    }
+    st.error(msgs.get(err, f"❌ 오류: {result.get('detail', err)}"))
     return None
 
 
+def _collect_page(vid: str, order: str, limit: int) -> list:
+    """한 가지 정렬 기준으로 최대 limit개 댓글을 페이지네이션 수집."""
+    rows, seen, next_token = [], set(), None
+    while len(rows) < limit:
+        try:
+            params = dict(part="snippet", videoId=vid,
+                          maxResults=100, order=order)
+            if next_token:
+                params["pageToken"] = next_token
+            r = _yt().commentThreads().list(**params).execute()
+        except Exception:
+            break
+
+        for item in r.get("items", []):
+            s = item["snippet"]["topLevelComment"]["snippet"]
+            c = re.sub(r"<[^>]+>", "", s.get("textDisplay", ""))
+            c = re.sub(r"https?://\S+", "", c).replace("\n", " ").strip()
+            if len(c) < Config.COMMENT_MIN_LEN or c in seen:
+                continue
+            seen.add(c)
+            rows.append({"time": s["publishedAt"], "text": c,
+                         "likes": int(s.get("likeCount", 0)),
+                         "order": order})
+            if len(rows) >= limit:
+                break
+
+        next_token = r.get("nextPageToken")
+        if not next_token:
+            break
+    return rows
+
+
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_comments(vid: str, limit: int = Config.COMMENT_LIMIT) -> pd.DataFrame:
-    try:
-        r = _yt().commentThreads().list(
-            part="snippet", videoId=vid,
-            maxResults=min(limit * 2, 100), order="relevance",
-        ).execute()
-    except HttpError as e:
-        if e.resp.status == 403:
-            st.warning("⚠️ 댓글이 비활성화된 영상이거나 API 할당량이 초과되었습니다.")
-        else:
-            st.error(f"❌ 댓글 수집 오류 ({e.resp.status}): {e}")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"❌ 댓글 수집 중 오류: {type(e).__name__}: {e}")
+def fetch_comments(vid: str) -> pd.DataFrame:
+    """
+    ① 인기 댓글 최대 100개 (order=relevance)
+    ② 최신 댓글 최대 100개 (order=time)
+    → 중복 제거 후 합산, 최대 200개
+    """
+    popular = _collect_page(vid, "relevance", Config.SAMPLE_POPULAR)
+    recent  = _collect_page(vid, "time",      Config.SAMPLE_RECENT)
+
+    # 중복 텍스트 제거 (인기 우선 유지)
+    seen, merged = set(), []
+    for row in popular + recent:
+        if row["text"] not in seen:
+            seen.add(row["text"])
+            merged.append(row)
+
+    if not merged:
+        st.warning("⚠️ 수집된 댓글이 없습니다.")
         return pd.DataFrame()
 
-    rows, seen = [], set()
-    for item in r.get("items", []):
-        s = item["snippet"]["topLevelComment"]["snippet"]
-        c = re.sub(r"<[^>]+>", "", s.get("textDisplay", ""))
-        c = re.sub(r"https?://\S+", "", c).replace("\n", " ").strip()
-        if len(c) < Config.COMMENT_MIN_LEN or c in seen: continue
-        seen.add(c)
-        rows.append({"time": s["publishedAt"], "text": c,
-                     "likes": int(s.get("likeCount", 0))})
-        if len(rows) >= limit: break
-
-    if not rows: return pd.DataFrame()
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(merged)
     df["time"] = pd.to_datetime(df["time"])
     return df
 
-def fetch_view_history(info: dict) -> pd.DataFrame:
-    """
-    개시일 당일: 시간 단위 포인트 (개시 시각 ~ 자정 or 현재)
-    개시일 다음날~오늘: 1일 단위 포인트 (날짜별 누적 조회수)
-    두 구간을 이어붙여 하나의 DataFrame으로 반환합니다.
-    """
-    if not info:
-        return pd.DataFrame()
 
-    pub_raw = pd.to_datetime(info["published"])           # 개시 정확 시각 (UTC 등)
-    pub_day = pub_raw.normalize()                          # 개시일 00:00
-    now     = pd.Timestamp.now().tz_localize(None)
-    today   = now.normalize()                              # 오늘 00:00
-    total   = int(info["view_count"])
-    days_elapsed = int((today - pub_day).days)
-
-    rows = []  # {"date": Timestamp, "views": int, "is_hourly": bool}
-
-    # ── 구간 1: 개시일 당일 시간 단위 ───────────────────────
-    day0_end = pub_day + pd.Timedelta(days=1)  # 개시일 자정 (다음날 00:00)
-    hour_end = min(day0_end, now)              # 자정 or 현재 중 이른 시각
-
-    # 개시 시각 ~ hour_end 를 1시간 간격으로
-    hour_range = pd.date_range(pub_raw.floor("h"), hour_end, freq="h")
-    if len(hour_range) < 2:
-        hour_range = pd.DatetimeIndex([pub_raw.floor("h"), hour_end])
-
-    n_h = len(hour_range)
-    if days_elapsed == 0:
-        # 당일이면 마지막 포인트 = 현재 total
-        end_views = total
-    else:
-        # 개시일 하루 동안의 조회수 = total * 첫날 비중(지수 모델 day0 기여분)
-        # 전체 n일 중 day0 가중치를 지수 곡선에서 추정
-        n_total = days_elapsed + 1
-        x_all   = np.linspace(0.0, 4.0, n_total)
-        w_all   = 1.0 - np.exp(-x_all)
-        w_all   = w_all / w_all[-1]
-        end_views = int(round(float(w_all[0]) * total))  # day0 끝 조회수 (거의 0에 가까움)
-        end_views = max(end_views, 1)
-
-    # 시간 내 지수 증가
-    x_h = np.linspace(0.0, 2.0, n_h)
-    w_h = 1.0 - np.exp(-x_h)
-    w_h = w_h / w_h[-1] if w_h[-1] > 0 else np.linspace(0.0, 1.0, n_h)
-    for ts, wv in zip(hour_range, w_h):
-        rows.append({"date": ts, "views": int(round(float(wv) * end_views)),
-                     "is_hourly": True})
-
-    # ── 구간 2: 개시일 다음날 ~ 오늘 1일 단위 ───────────────
-    if days_elapsed >= 1:
-        day1     = pub_day + pd.Timedelta(days=1)
-        day_range = pd.date_range(day1, today, freq="D").tolist()
-        n_d      = len(day_range)
-
-        # day1 ~ today 구간의 누적 조회수 범위: end_views ~ total
-        x_d = np.linspace(0.0, 4.0, n_d + 1)[1:]   # day1부터 시작 (day0 제외)
-        # 전체 지수 곡선에서 day1 이후 부분 재정규화
-        n_total = days_elapsed + 1
-        x_all   = np.linspace(0.0, 4.0, n_total)
-        w_all   = 1.0 - np.exp(-x_all)
-        w_all   = w_all / w_all[-1]
-
-        for i, ts in enumerate(day_range):
-            rows.append({"date": ts,
-                         "views": int(round(float(w_all[i + 1]) * total)),
-                         "is_hourly": False})
-
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"])
-    return df
-
-
-def chart_view_trend(info: dict) -> go.Figure | None:
-    """
-    개시일 당일: 시간 단위 / 다음날 이후: 1일 단위 누적 조회수 차트.
-    hover 시 날짜(시간) + 누적 조회수 표시.
-    """
-    import math
-
-    df = fetch_view_history(info)
-    if df.empty or len(df) < 2:
-        return None
-
-    total     = int(info["view_count"])
-    # Y축 최대: 현재 조회수 기준으로 깔끔하게 올림 (조회수가 그래프 상단에 표시되도록)
-    # 예) 8,056 → 10,000 / 76,349 → 100,000 / 1,200,000 → 2,000,000
-    import math as _math
-    if total > 0:
-        magnitude = 10 ** _math.floor(_math.log10(total))
-        max_views = _math.ceil(total / magnitude) * magnitude
-        # 최소 눈금이 너무 촘촘해지지 않도록 2배 여유
-        if max_views == total:
-            max_views = int(total * 1.2)
-    else:
-        max_views = 10_000  # 조회수 0일 때 기본값
-    span_days = int((df["date"].iloc[-1] - df["date"].iloc[0]).days)
-
-    # Y축 tick
-    raw_tick  = max_views / 5
-    magnitude = 10 ** math.floor(math.log10(max(raw_tick, 1)))
-    y_dtick   = math.ceil(raw_tick / magnitude) * magnitude
-
-    # X축 tick: 전체 span 기준
-    if span_days <= 3:
-        x_dtick = 3600000 * 6      # 6시간 (ms)
-        x_fmt   = "%m/%d %H시"
-    elif span_days <= 14:
-        x_dtick = 86400000         # 1일
-        x_fmt   = "%m/%d"
-    elif span_days <= 60:
-        x_dtick = 86400000 * 3    # 3일
-        x_fmt   = "%m/%d"
-    elif span_days <= 365:
-        x_dtick = 86400000 * 7    # 7일
-        x_fmt   = "%m/%d"
-    else:
-        x_dtick = "M1"
-        x_fmt   = "%Y-%m"
-
-    # hover 텍스트: 시간 단위 포인트는 시각 포함, 일 단위는 날짜만
-    customdata = []
-    hover_texts = []
-    for _, row in df.iterrows():
-        ts = row["date"]
-        if row["is_hourly"]:
-            label = f"{ts.month}월 {ts.day}일 {ts.hour:02d}:00"
-        else:
-            label = f"{ts.year}년 {ts.month}월 {ts.day}일"
-        hover_texts.append(label)
-        customdata.append(int(row["views"]))
-
-    fig = go.Figure(go.Scatter(
-        x          = df["date"],
-        y          = df["views"],
-        mode       = "lines+markers",
-        line       = dict(color="#5b9bd5", width=2),
-        marker     = dict(size=4, color="#5b9bd5", opacity=0.8,
-                          line=dict(color="#fff", width=1)),
-        text       = hover_texts,
-        customdata = customdata,
-        hovertemplate = (
-            "<b>%{text}</b><br>"
-            "누적 조회수: <b>%{customdata:,}회</b>"
-            "<extra></extra>"
-        ),
-        hoverlabel = dict(
-            bgcolor     = "#1c2333",
-            font        = dict(color="#fff", size=12,
-                               family="Noto Sans KR, sans-serif"),
-            bordercolor = "#1c2333",
-        ),
-    ))
-
-    x_start = str((df["date"].iloc[0]  - pd.Timedelta(hours=6)).isoformat())
-    x_end   = str((df["date"].iloc[-1] + pd.Timedelta(hours=6)).isoformat())
-
-    fig.update_layout(
-        paper_bgcolor = "rgba(0,0,0,0)",
-        plot_bgcolor  = "rgba(0,0,0,0)",
-        font   = dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
-        margin = dict(l=8, r=8, t=8, b=50),
-        height = 300,
-        hovermode = "closest",
-        xaxis = dict(
-            showgrid   = True,
-            gridcolor  = "#f0f0f0",
-            zeroline   = False,
-            type       = "date",
-            tickformat = x_fmt,
-            dtick      = x_dtick,
-            tickangle  = -35,
-            tickfont   = dict(size=10),
-            range      = [x_start, x_end],
-        ),
-        yaxis = dict(
-            showgrid   = True,
-            gridcolor  = "#ececec",
-            zeroline   = False,
-            range      = [0, max_views * 1.08],
-            dtick      = y_dtick,
-            tickformat = ",.0f",
-            tickfont   = dict(size=10),
-        ),
-    )
-    return fig
-
-
+# ============================================================
+# 5. AI 분석
+# ============================================================
 def _prompt(texts: list) -> str:
     labels = "/".join(Config.SENTIMENT_LABELS)
     lines  = "\n".join(f"{i+1}. {t[:120]}" for i, t in enumerate(texts))
@@ -524,9 +394,9 @@ def _parse(text: str) -> pd.DataFrame:
                          sep="|", on_bad_lines="skip", engine="python", dtype=str)
     except Exception: return pd.DataFrame()
     df.columns = [c.strip() for c in df.columns]
-    needed = {"감성", "분류", "키워드", "댓글내용"}
-    if not needed.issubset(df.columns): return pd.DataFrame()
-    df = df[list(needed)].copy().dropna(subset=["감성", "분류"])
+    if not {"감성","분류","키워드","댓글내용"}.issubset(df.columns):
+        return pd.DataFrame()
+    df = df[["감성","분류","키워드","댓글내용"]].copy().dropna(subset=["감성","분류"])
     df["감성"] = df["감성"].str.strip()
     df.loc[~df["감성"].isin(set(Config.SENTIMENT_LABELS)), "감성"] = "중립"
     return df[df["댓글내용"].str.strip().str.len() > 0].reset_index(drop=True)
@@ -546,6 +416,7 @@ def _call_api(prompt: str) -> tuple:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _run_batches(h: str, texts: list) -> tuple:
+    """캐시 함수 — st.* 호출 없음."""
     batches = [texts[i:i+Config.BATCH_SIZE]
                for i in range(0, len(texts), Config.BATCH_SIZE)]
     results, errors = [], []
@@ -563,25 +434,25 @@ def analyze(h: str, texts: list) -> pd.DataFrame:
     if errors:
         with st.expander("⚠️ 오류 상세", expanded=False):
             for e in errors: st.code(e)
-    frames = [_parse(r) for r, _ in raw_results]
+    frames = [_parse(r) for r, _ in raw_results if _parse(r) is not None]
     frames = [f for f in frames if not f.empty]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 # ============================================================
-# 5. 분류 병합 (최대 8개)
+# 6. 분류 병합 (최대 8개)
 # ============================================================
-def merge_topics(df: pd.DataFrame, max_n: int = Config.MAX_TOPICS) -> pd.DataFrame:
+def merge_topics(df: pd.DataFrame) -> pd.DataFrame:
     counts = df["분류"].value_counts()
-    if len(counts) <= max_n: return df.copy()
-    top    = counts.iloc[:max_n - 1].index.tolist()
-    out    = df.copy()
+    if len(counts) <= Config.MAX_TOPICS: return df.copy()
+    top = counts.iloc[:Config.MAX_TOPICS - 1].index.tolist()
+    out = df.copy()
     out["분류"] = out["분류"].apply(lambda x: x if x in top else "기타")
     return out
 
 
 # ============================================================
-# 6. 차트 — 원본 사이트 스타일
+# 7. 차트
 # ============================================================
 BASE = dict(
     paper_bgcolor="rgba(0,0,0,0)",
@@ -591,119 +462,217 @@ BASE = dict(
 )
 
 def chart_donut(res_df: pd.DataFrame) -> go.Figure:
-    """원본: 큰 도넛, 퍼센트 레이블, 우측 범례."""
-    sc = res_df["감성"].value_counts().reset_index()
+    sc     = res_df["감성"].value_counts().reset_index()
     sc.columns = ["감성", "n"]
     colors = [Config.SENTIMENT_COLORS[s] for s in sc["감성"]]
     fig = go.Figure(go.Pie(
-        labels=sc["감성"], values=sc["n"],
-        hole=0.50,
+        labels=sc["감성"], values=sc["n"], hole=0.50,
         marker=dict(colors=colors, line=dict(color="#fff", width=2)),
-        textinfo="percent",
-        textposition="inside",
+        textinfo="percent", textposition="inside",
         textfont=dict(size=13, color="#fff"),
         hovertemplate="%{label}: %{value}개 (%{percent})<extra></extra>",
         sort=False,
     ))
     fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
-        margin=dict(l=8, r=90, t=8, b=8),
-        height=340,
-        legend=dict(
-            orientation="v", x=1.02, y=0.5,
-            xanchor="left", yanchor="middle",
-            font=dict(size=12),
-            itemsizing="constant",
-        ),
+        margin=dict(l=8, r=90, t=8, b=8), height=320,
+        legend=dict(orientation="v", x=1.02, y=0.5,
+                    xanchor="left", yanchor="middle",
+                    font=dict(size=12), itemsizing="constant"),
     )
     return fig
 
 def chart_topic_bar(res_df: pd.DataFrame) -> go.Figure:
-    """원본: 가로 막대, 하단 범례(중립/부정/긍정), 분류 최대 8개."""
     df    = merge_topics(res_df)
-    bd    = df.groupby(["분류", "감성"]).size().reset_index(name="n")
-    order = (bd.groupby("분류")["n"].sum()
-               .sort_values(ascending=True).index.tolist())
-
-    fig = px.bar(
-        bd, x="n", y="분류", color="감성",
-        orientation="h",
-        color_discrete_map=Config.SENTIMENT_COLORS,
-        category_orders={
-            "분류": order,
-            "감성": ["중립", "부정", "긍정"],
-        },
-        labels={"n": "", "분류": ""},
-        height=max(240, len(order) * 48),
-    )
+    bd    = df.groupby(["분류","감성"]).size().reset_index(name="n")
+    order = bd.groupby("분류")["n"].sum().sort_values(ascending=True).index.tolist()
+    fig   = px.bar(bd, x="n", y="분류", color="감성", orientation="h",
+                   color_discrete_map=Config.SENTIMENT_COLORS,
+                   category_orders={"분류": order, "감성": ["중립","부정","긍정"]},
+                   labels={"n":"","분류":""}, height=max(240, len(order)*50))
     fig.update_layout(
         **BASE,
-        legend=dict(
-            orientation="h", y=-0.18, x=0.5, xanchor="center",
-            font=dict(size=11), traceorder="normal",
-            title=None,
-        ),
+        legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center",
+                    font=dict(size=11), traceorder="normal", title=None),
         xaxis=dict(showgrid=True, gridcolor="#ececec", zeroline=False,
                    tickfont=dict(size=10)),
-        yaxis=dict(showgrid=False, tickfont=dict(size=10)),
+        yaxis=dict(showgrid=False, tickfont=dict(size=11)),
         bargap=0.32,
     )
     fig.update_traces(marker_line_width=0)
     return fig
 
+def fetch_view_history(info: dict) -> pd.DataFrame:
+    pub_raw      = pd.to_datetime(info["published"])
+    pub_day      = pub_raw.normalize()
+    now          = pd.Timestamp.now().tz_localize(None)
+    today        = now.normalize()
+    total        = int(info["view_count"])
+    days_elapsed = int((today - pub_day).days)
+
+    rows = []
+    # 구간 1: 개시일 당일 — 시간 단위
+    day0_end   = pub_day + pd.Timedelta(days=1)
+    hour_end   = min(day0_end, now)
+    hour_range = pd.date_range(pub_raw.floor("h"), hour_end, freq="h")
+    if len(hour_range) < 2:
+        hour_range = pd.DatetimeIndex([pub_raw.floor("h"), hour_end])
+
+    n_h = len(hour_range)
+    if days_elapsed == 0:
+        end_v = total
+    else:
+        n_t   = days_elapsed + 1
+        x_a   = np.linspace(0.0, 4.0, n_t)
+        w_a   = (1.0 - np.exp(-x_a)); w_a /= w_a[-1]
+        end_v = max(int(round(float(w_a[0]) * total)), 1)
+
+    x_h = np.linspace(0.0, 2.0, n_h); w_h = 1.0 - np.exp(-x_h)
+    w_h = w_h / w_h[-1] if w_h[-1] > 0 else np.linspace(0.0, 1.0, n_h)
+    for ts, wv in zip(hour_range, w_h):
+        rows.append({"date": ts, "views": int(round(float(wv)*end_v)),
+                     "is_hourly": True})
+
+    # 구간 2: 다음날 ~ 오늘 — 일 단위
+    if days_elapsed >= 1:
+        day1      = pub_day + pd.Timedelta(days=1)
+        day_range = pd.date_range(day1, today, freq="D").tolist()
+        n_t       = days_elapsed + 1
+        x_a       = np.linspace(0.0, 4.0, n_t)
+        w_a       = (1.0 - np.exp(-x_a)); w_a /= w_a[-1]
+        for i, ts in enumerate(day_range):
+            rows.append({"date": ts,
+                         "views": int(round(float(w_a[i+1]) * total)),
+                         "is_hourly": False})
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+def chart_view_trend(info: dict) -> go.Figure | None:
+    import math
+    df = fetch_view_history(info)
+    if df.empty or len(df) < 2: return None
+
+    total     = int(info["view_count"])
+    span_days = int((df["date"].iloc[-1] - df["date"].iloc[0]).days)
+
+    # Y축
+    if total > 0:
+        mag   = 10 ** math.floor(math.log10(total))
+        max_v = math.ceil(total / mag) * mag
+        if max_v == total: max_v = int(total * 1.2)
+    else:
+        max_v = 10_000
+    raw_t  = max_v / 5
+    mag2   = 10 ** math.floor(math.log10(max(raw_t, 1)))
+    y_tick = math.ceil(raw_t / mag2) * mag2
+
+    # X축
+    if span_days <= 3:
+        x_dtick, x_fmt = 3600000*6, "%m/%d %H시"
+    elif span_days <= 14:
+        x_dtick, x_fmt = 86400000, "%m/%d"
+    elif span_days <= 60:
+        x_dtick, x_fmt = 86400000*3, "%m/%d"
+    elif span_days <= 365:
+        x_dtick, x_fmt = 86400000*7, "%m/%d"
+    else:
+        x_dtick, x_fmt = "M1", "%Y-%m"
+
+    hover_texts = []
+    for _, row in df.iterrows():
+        ts = row["date"]
+        hover_texts.append(
+            f"{ts.month}월 {ts.day}일 {ts.hour:02d}:00" if row["is_hourly"]
+            else f"{ts.year}년 {ts.month}월 {ts.day}일"
+        )
+
+    fig = go.Figure(go.Scatter(
+        x=df["date"], y=df["views"],
+        mode="lines+markers",
+        line=dict(color="#5b9bd5", width=2),
+        marker=dict(size=4, color="#5b9bd5", opacity=0.8,
+                    line=dict(color="#fff", width=1)),
+        text=hover_texts, customdata=df["views"].tolist(),
+        hovertemplate="<b>%{text}</b><br>누적 조회수: <b>%{customdata:,}회</b><extra></extra>",
+        hoverlabel=dict(bgcolor="#1c2333",
+                        font=dict(color="#fff", size=12,
+                                  family="Noto Sans KR, sans-serif"),
+                        bordercolor="#1c2333"),
+    ))
+    x_start = str((df["date"].iloc[0]  - pd.Timedelta(hours=6)).isoformat())
+    x_end   = str((df["date"].iloc[-1] + pd.Timedelta(hours=6)).isoformat())
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Noto Sans KR, sans-serif", size=11, color="#555"),
+        margin=dict(l=8, r=8, t=8, b=50), height=290, hovermode="closest",
+        xaxis=dict(showgrid=True, gridcolor="#f0f0f0", zeroline=False,
+                   type="date", tickformat=x_fmt, dtick=x_dtick,
+                   tickangle=-35, tickfont=dict(size=10),
+                   range=[x_start, x_end]),
+        yaxis=dict(showgrid=True, gridcolor="#ececec", zeroline=False,
+                   range=[0, max_v * 1.08], dtick=y_tick,
+                   tickformat=",.0f", tickfont=dict(size=10)),
+    )
+    return fig
+
 
 # ============================================================
-# 7. 메인
+# 8. 메인
 # ============================================================
-
-# ── 분석 대상 영상 (코드 변경 시 이 URL만 수정하세요) ────────
-TARGET_URL = "https://www.youtube.com/watch?v=fNHLffyXnQM&t=3s"
-# ──────────────────────────────────────────────────────────────
-
 def main():
-
-    # ── 타이틀 ───────────────────────────────────────────────
     st.markdown('<div class="page-title">📊 국민연금 유튜브 여론 모니터링</div>',
                 unsafe_allow_html=True)
 
-    # ── 영상 ID 추출 (하드코딩) ──────────────────────────────
     vid = extract_video_id(TARGET_URL)
     if not vid:
-        st.error("❌ TARGET_URL이 유효하지 않습니다. 코드 상단의 URL을 확인하세요.")
-        return
+        st.error("❌ TARGET_URL이 유효하지 않습니다."); return
 
-    # ── 수집 ─────────────────────────────────────────────────
-    with st.spinner("데이터 수집 중..."):
-        info   = fetch_video_info(vid)
-        raw_df = fetch_comments(vid)
+    # ② session_state 캐싱 —————————————————————————————————
+    # 재렌더링(위젯 조작 등) 시 API를 재호출하지 않음
+    # "재분석" 버튼 클릭 시에만 캐시 초기화 후 재수집
+    col_title, col_btn = st.columns([6, 1])
+    with col_btn:
+        if st.button("🔄 재분석"):
+            for k in ["info","raw_df","res_df"]:
+                st.session_state.pop(k, None)
+            st.cache_data.clear()
 
-    if not info:
-        return
-    if raw_df.empty:
-        st.error("❌ 댓글을 수집할 수 없습니다."); return
+    need_fetch = any(k not in st.session_state
+                     for k in ["info","raw_df","res_df"])
 
-    # ── AI 분석 ──────────────────────────────────────────────
-    with st.spinner("AI 분석 중..."):
-        h      = hashlib.md5("".join(raw_df["text"].tolist()).encode()).hexdigest()
-        res_df = analyze(h, raw_df["text"].tolist())
+    if need_fetch:
+        with st.spinner("📡 데이터 수집 중..."):
+            info   = fetch_video_info(vid)
+            raw_df = fetch_comments(vid)
+        if not info:       return
+        if raw_df.empty:   st.error("❌ 댓글 수집 실패"); return
 
-    if res_df.empty:
-        st.error("❌ AI 분석에 실패했습니다."); return
+        with st.spinner(f"🤖 AI 분석 중 ({len(raw_df)}개 댓글, "
+                        f"{(len(raw_df)+Config.BATCH_SIZE-1)//Config.BATCH_SIZE}배치)..."):
+            h      = hashlib.md5("".join(raw_df["text"].tolist()).encode()).hexdigest()
+            res_df = analyze(h, raw_df["text"].tolist())
+        if res_df.empty:   st.error("❌ AI 분석 실패"); return
 
-    # ════════════════════════════════════════════
-    # 영상 제목 박스
-    # ════════════════════════════════════════════
+        # session_state 저장
+        st.session_state["info"]   = info
+        st.session_state["raw_df"] = raw_df
+        st.session_state["res_df"] = res_df
+    else:
+        info   = st.session_state["info"]
+        raw_df = st.session_state["raw_df"]
+        res_df = st.session_state["res_df"]
+
+    # ════ 영상 제목 박스 ═══════════════════════════════════
     st.markdown(f"""
     <div class="video-box">
         <div class="vb-label">분석 대상 영상:</div>
         <div class="vb-title">🎥 {info['title']}</div>
     </div>""", unsafe_allow_html=True)
 
-    # ════════════════════════════════════════════
-    # 메트릭 4개
-    # ════════════════════════════════════════════
+    # ════ 메트릭 4개 ═══════════════════════════════════════
     now_str = datetime.now().strftime("%Y-%m-%d\n%H:%M:%S")
     st.markdown(f"""
     <div class="metric-row">
@@ -725,9 +694,18 @@ def main():
         </div>
     </div>""", unsafe_allow_html=True)
 
-    # ════════════════════════════════════════════
-    # 📈 시간대별 누적 조회수 추이
-    # ════════════════════════════════════════════
+    # ③ 샘플 정보 뱃지 ————————————————————————————————————
+    pop_n = len(raw_df[raw_df["order"]=="relevance"]) if "order" in raw_df.columns else len(raw_df)
+    rec_n = len(raw_df[raw_df["order"]=="time"])      if "order" in raw_df.columns else 0
+    st.markdown(f"""
+    <div class="sample-badge">
+        분석 댓글 총 <strong>{len(raw_df)}개</strong>
+        <span>인기순 {pop_n}개</span>
+        <span>최신순 {rec_n}개</span>
+        (전체 댓글 {info['comment_count']:,}개 중 샘플)
+    </div>""", unsafe_allow_html=True)
+
+    # ════ 📈 누적 조회수 추이 ═══════════════════════════════
     vt = chart_view_trend(info)
     if vt:
         with st.container(border=True):
@@ -736,27 +714,21 @@ def main():
             st.plotly_chart(vt, use_container_width=True,
                             config={"displayModeBar": False})
 
-    # ════════════════════════════════════════════
-    # 😊 전체 감성 분포
-    # ════════════════════════════════════════════
+    # ════ 😊 감성 분포 ══════════════════════════════════════
     with st.container(border=True):
         st.markdown('<div class="card-title">😊 전체 감성 분포</div>',
                     unsafe_allow_html=True)
         st.plotly_chart(chart_donut(res_df), use_container_width=True,
                         config={"displayModeBar": False})
 
-    # ════════════════════════════════════════════
-    # 📊 분류별 여론
-    # ════════════════════════════════════════════
+    # ════ 📊 분류별 여론 ════════════════════════════════════
     with st.container(border=True):
         st.markdown('<div class="card-title">📊 분류별 여론 (긍정/부정/중립)</div>',
                     unsafe_allow_html=True)
         st.plotly_chart(chart_topic_bar(res_df), use_container_width=True,
                         config={"displayModeBar": False})
 
-    # ════════════════════════════════════════════
-    # 📝 전체 분석 데이터
-    # ════════════════════════════════════════════
+    # ════ 📝 전체 분석 데이터 ═══════════════════════════════
     with st.container(border=True):
         col_t, col_f = st.columns([3, 1])
         with col_t:
@@ -769,17 +741,17 @@ def main():
         st.markdown('<div class="sort-hint">헤더를 클릭해 정렬하세요</div>',
                     unsafe_allow_html=True)
 
-        filtered = res_df if sel == "전체" else res_df[res_df["감성"] == sel]
-
+        filtered  = res_df if sel == "전체" else res_df[res_df["감성"] == sel]
         rows_html = ""
         for _, row in filtered.iterrows():
             css = Config.SENTIMENT_CSS.get(row["감성"], "s-neu")
+            content = str(row["댓글내용"])[:60]
             rows_html += f"""
             <tr>
                 <td><span class="{css}">{row['감성']}</span></td>
                 <td><span class="tag">{str(row['분류'])}</span></td>
                 <td><strong>{str(row['키워드'])[:18]}</strong></td>
-                <td>{str(row['댓글내용'])[:55]}</td>
+                <td><div class="comment-text" title="{content}">{content}</div></td>
             </tr>"""
 
         st.markdown(f"""
@@ -798,9 +770,7 @@ def main():
             mime="text/csv",
         )
 
-    # ════════════════════════════════════════════
-    # 면책조항
-    # ════════════════════════════════════════════
+    # ════ 면책조항 ══════════════════════════════════════════
     st.markdown("""
     <div class="disclaimer">
         <div class="d-title">⚠️ 면책조항 (Disclaimer)</div>

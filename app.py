@@ -337,7 +337,7 @@ class Config:
 # ============================================================
 # 2. 분석 대상 영상
 # ============================================================
-TARGET_URL = "https://www.youtube.com/watch?v=fNHLffyXnQM&t=3s"
+TARGET_URL = "https://www.youtube.com/watch?v=fNHLffyXnQM"
 
 
 # ============================================================
@@ -530,6 +530,14 @@ def _call_api(prompt: str) -> tuple[str | None, str | None]:
                     time.sleep(Config.RETRY_WAIT)
     return None, last_err
 
+class AnalysisFailed(RuntimeError):
+    """전 배치 분석 실패. 예외는 st.cache_data에 캐시되지 않으므로
+    키/할당량 문제를 고친 뒤 새로고침만 해도 재시도된다."""
+    def __init__(self, errors: list[str]):
+        super().__init__("AI 분석 전체 실패")
+        self.errors = errors
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def analyze_comments(cache_key: str, _texts: tuple[str, ...]) -> tuple[pd.DataFrame, list[str]]:
     """cache_key(댓글 해시)로만 캐싱하고 _texts는 해싱에서 제외한다."""
@@ -549,7 +557,7 @@ def analyze_comments(cache_key: str, _texts: tuple[str, ...]) -> tuple[pd.DataFr
         if idx < len(batches) - 1:
             time.sleep(1)
     if not rows:
-        return pd.DataFrame(), errors
+        raise AnalysisFailed(errors)   # 실패 결과는 캐시하지 않음
     df = (pd.DataFrame(rows)
           .drop_duplicates(subset="댓글내용")
           .reset_index(drop=True))
@@ -770,16 +778,36 @@ def load_data(vid: str) -> bool:
     texts   = tuple(raw_df["text"])
     h       = hashlib.md5("\x1f".join(texts).encode()).hexdigest()
     n_batch = -(-len(texts) // Config.BATCH_SIZE)
-    with st.spinner(f"🤖 AI 분석 중 ({len(texts)}개 댓글, {n_batch}배치)..."):
-        res_df, errors = analyze_comments(h, texts)
+    try:
+        with st.spinner(f"🤖 AI 분석 중 ({len(texts)}개 댓글, {n_batch}배치)..."):
+            res_df, errors = analyze_comments(h, texts)
+    except AnalysisFailed as fail:
+        with st.expander("⚠️ 분석 오류 상세", expanded=False):
+            for e in fail.errors:
+                st.code(e)
+        joined = " ".join(fail.errors)
+        if fail.errors and all(_is_quota(e) for e in fail.errors):
+            if "limit: 0" in joined:
+                st.error(
+                    "❌ Gemini API 키의 프로젝트에 할당량이 없습니다 (limit: 0).\n\n"
+                    "사용량 초과가 아니라 무료 티어 자격이 없는 프로젝트의 키입니다. "
+                    "Google AI Studio(aistudio.google.com/apikey)에서 개인 계정으로 "
+                    "새 키를 발급하거나 프로젝트에 결제를 활성화한 뒤, Streamlit "
+                    "Secrets의 GEMINI_API_KEY를 교체하고 페이지를 새로고침하세요."
+                )
+            else:
+                st.error(
+                    "❌ Gemini API 할당량(429)을 초과했습니다. "
+                    "잠시 후(무료 티어는 분당/일일 한도 리셋 후) 재분석해 주세요."
+                )
+        else:
+            st.error("❌ AI 분석에 실패했습니다. 잠시 후 재분석해 주세요.")
+        return False
 
     if errors:
-        with st.expander("⚠️ 분석 오류 상세", expanded=False):
+        with st.expander("⚠️ 분석 오류 상세 (일부 배치 실패)", expanded=False):
             for e in errors:
                 st.code(e)
-    if res_df.empty:
-        st.error("❌ AI 분석에 실패했습니다. 잠시 후 재분석해 주세요.")
-        return False
 
     st.session_state["info"]   = info
     st.session_state["raw_df"] = raw_df

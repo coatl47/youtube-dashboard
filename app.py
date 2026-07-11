@@ -195,6 +195,8 @@ footer { display: none !important; }
     padding: 0.6rem 0.5rem;
     border-bottom: 1px solid #f5f5f5;
     vertical-align: top;
+    overflow: hidden;
+    word-break: break-word;
 }
 .data-table tr:last-child td { border-bottom: none; }
 .data-table tr:hover td { background: #fafafa; }
@@ -227,8 +229,13 @@ footer { display: none !important; }
     display: inline-block;
     background: #e3f0ff; color: #1f77b4;
     padding: 2px 7px; border-radius: 8px;
-    font-size: 0.65rem; white-space: nowrap;
-    word-break: keep-all; font-weight: 600;
+    font-size: 0.65rem;
+    white-space: normal;
+    word-break: keep-all;
+    word-wrap: break-word;
+    font-weight: 600;
+    line-height: 1.5;
+    max-width: 100%;
 }
 
 /* 댓글 내용 */

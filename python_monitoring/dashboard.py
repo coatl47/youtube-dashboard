@@ -53,7 +53,7 @@ st.markdown(
     [data-testid="stButton"] button:hover { color:#fff; border:0; transform:translateY(-1px); }
     .st-key-top_controls { width:100%; overflow:hidden; }
     .st-key-top_controls [data-testid="stHorizontalBlock"] {
-      display:grid!important; grid-template-columns:minmax(0,1fr) 76px; gap:6px; width:100%; align-items:stretch;
+      display:grid!important; grid-template-columns:minmax(0,1fr) 62px; gap:6px; width:100%; align-items:stretch;
     }
     .st-key-top_controls [data-testid="column"] { width:auto!important; min-width:0!important; flex:none!important; }
     .st-key-top_controls [data-testid="stButton"] button { min-height:48px; padding:0 4px; font-size:.69rem; white-space:nowrap; }
@@ -154,7 +154,7 @@ def section_heading(title: str, caption: str | None = None) -> None:
 
 
 with st.container(key="top_controls"):
-    link_col, run_col = st.columns([5, 1])
+    link_col, run_col = st.columns([6, 1])
     with link_col:
         video_url = st.text_input(
             "유튜브 영상 링크",
@@ -163,7 +163,7 @@ with st.container(key="top_controls"):
             label_visibility="collapsed",
         ).strip()
     with run_col:
-        run_analysis = st.button("수집·분석", type="primary", use_container_width=True)
+        run_analysis = st.button("분석", type="primary", use_container_width=True)
 
 video_url = video_url or TARGET_VIDEO_URL
 
@@ -250,17 +250,24 @@ metric_html = "".join(
 st.markdown(f'<div class="metric-grid">{metric_html}</div>', unsafe_allow_html=True)
 
 with st.container(border=True):
-    section_heading("시간대별 누적 조회수 추이")
+    section_heading("시간대별 누적 조회수 추이", "실제 수집값 기준 · 기간에 따라 시간별 또는 일별 표시")
     if history:
         hdf = pd.DataFrame(history)
         hdf["observed_at_utc"] = pd.to_datetime(hdf["observed_at_utc"], utc=True).dt.tz_convert("Asia/Seoul")
         baseline = pd.DataFrame({"observed_at_utc":[published], "view_count":[0]})
         chart_df = pd.concat([baseline, hdf[["observed_at_utc", "view_count"]]], ignore_index=True)
         chart_df = chart_df.sort_values("observed_at_utc", kind="stable").drop_duplicates("observed_at_utc", keep="last")
+        span = chart_df["observed_at_utc"].max() - chart_df["observed_at_utc"].min()
+        period = "h" if span <= pd.Timedelta(days=2) else "D"
+        chart_df = (
+            chart_df.set_index("observed_at_utc")
+            .resample(period)["view_count"].last().dropna().reset_index()
+        )
+        line_shape = "spline" if len(chart_df) >= 3 else "linear"
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=chart_df["observed_at_utc"], y=chart_df["view_count"], mode="lines+markers",
-            line=dict(color="#1768bd", width=3), marker=dict(size=7, color="#1768bd"),
+            line=dict(color="#1768bd", width=3, shape=line_shape, smoothing=.8), marker=dict(size=7, color="#1768bd"),
             fill="tozeroy", fillcolor="rgba(23,104,189,.09)", hovertemplate="%{y:,}회<extra></extra>",
         ))
         latest_point = chart_df.iloc[-1]
@@ -275,8 +282,11 @@ with st.container(border=True):
             font=dict(family="Pretendard, Noto Sans KR, sans-serif", color="#647184", size=11),
             hovermode="x unified", showlegend=False,
         )
-        fig.update_xaxes(gridcolor="#e7ebf0", showline=True, linecolor="#aeb8c4")
-        fig.update_yaxes(gridcolor="#e7ebf0", tickformat="~s")
+        fig.update_xaxes(
+            gridcolor="#e7ebf0", showline=True, linecolor="#aeb8c4",
+            tickformat="%m-%d<br>%H:%M" if period == "h" else "%Y-%m-%d",
+        )
+        fig.update_yaxes(gridcolor="#e7ebf0", tickformat="~s", rangemode="tozero")
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
     else:
         st.info("아직 조회수 관측 데이터가 없습니다. 수집·분석 버튼을 눌러주세요.")

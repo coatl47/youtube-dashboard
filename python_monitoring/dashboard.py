@@ -302,11 +302,11 @@ with st.container(border=True):
         )
         fig.update_traces(textposition="inside", textinfo="percent", textfont_size=13, marker_line_color="#fff", marker_line_width=1)
         fig.update_layout(
-            height=390, margin=dict(l=8,r=8,t=16,b=72), paper_bgcolor="rgba(0,0,0,0)",
-            legend=dict(orientation="h", yanchor="top", y=-.04, xanchor="center", x=.5, title=""),
+            height=310, margin=dict(l=8,r=8,t=8,b=8), paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=.01, xanchor="center", x=.5, title=""),
             font=dict(family="Pretendard, Noto Sans KR, sans-serif", color="#647184", size=11),
         )
-        fig.update_traces(domain=dict(x=[.08,.92], y=[.18,1]))
+        fig.update_traces(domain=dict(x=[.1,.9], y=[.22,1]))
         st.plotly_chart(fig, width="stretch", config={"displayModeBar":False})
     else:
         st.info("분석된 댓글이 없습니다.")
@@ -322,14 +322,14 @@ with st.container(border=True):
             color_discrete_map={"긍정":"#13a05d", "부정":"#e6313b", "중립":"#8b9bad"},
         )
         fig.update_layout(
-            height=max(330, 42*len(order)+120), margin=dict(l=8,r=8,t=18,b=8),
+            height=max(280, 34*len(order)+105), margin=dict(l=8,r=8,t=8,b=8),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             xaxis_title="", yaxis_title="", bargap=.28,
-            legend=dict(orientation="h", yanchor="bottom", y=-.2, xanchor="center", x=.5, title=""),
+            legend=dict(orientation="h", yanchor="bottom", y=.01, xanchor="center", x=.5, title=""),
             font=dict(family="Pretendard, Noto Sans KR, sans-serif", color="#647184", size=11),
         )
         fig.update_xaxes(gridcolor="#e8ecf1")
-        fig.update_yaxes(gridcolor="rgba(0,0,0,0)")
+        fig.update_yaxes(gridcolor="rgba(0,0,0,0)", domain=[.2,1])
         st.plotly_chart(fig, width="stretch", config={"displayModeBar":False})
     else:
         st.info("분석된 댓글이 없습니다.")

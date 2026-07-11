@@ -76,7 +76,7 @@ class YouTubeClient:
             channel_title=snippet.get("channelTitle", "알 수 없는 채널"),
             title=snippet["title"],
             published_at=parse_time(snippet["publishedAt"]),
-            canonical_url=f"https://www.youtube.com/watch?v=fNHLffyXnQM",
+            canonical_url=f"https://www.youtube.com/watch?v={video_id}",
         )
         snapshot = MetricSnapshot(
             video_id=video_id,

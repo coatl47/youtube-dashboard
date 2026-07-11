@@ -51,9 +51,9 @@ st.markdown(
       color:#fff; font-weight:850; box-shadow:0 9px 20px rgba(23,105,199,.22);
     }
     [data-testid="stButton"] button:hover { color:#fff; border:0; transform:translateY(-1px); }
-    .st-key-top_controls { width:100%; overflow:hidden; }
+    .st-key-top_controls { width:calc(100% + 10px); max-width:none; margin-right:-10px; overflow:visible; }
     .st-key-top_controls [data-testid="stHorizontalBlock"] {
-      display:grid!important; grid-template-columns:minmax(0,1fr) 84px; gap:6px; width:100%; align-items:stretch;
+      display:grid!important; grid-template-columns:minmax(0,1fr) 84px; gap:6px; width:100%!important; max-width:none!important; align-items:stretch;
     }
     .st-key-top_controls [data-testid="column"] { width:auto!important; min-width:0!important; flex:none!important; }
     .st-key-top_controls [data-testid="stButton"] button { width:100%; min-height:48px; padding:0 12px; font-size:.74rem; white-space:nowrap; }

@@ -51,10 +51,12 @@ st.markdown(
       color:#fff; font-weight:850; box-shadow:0 9px 20px rgba(23,105,199,.22);
     }
     [data-testid="stButton"] button:hover { color:#fff; border:0; transform:translateY(-1px); }
-    .st-key-top_controls [data-testid="stHorizontalBlock"] { gap:7px; flex-wrap:nowrap; align-items:stretch; }
-    .st-key-top_controls [data-testid="column"]:first-child { min-width:0; flex:1 1 auto!important; }
-    .st-key-top_controls [data-testid="column"]:last-child { min-width:78px; flex:0 0 82px!important; }
-    .st-key-top_controls [data-testid="stButton"] button { min-height:48px; padding:0 7px; font-size:.72rem; }
+    .st-key-top_controls { width:100%; overflow:hidden; }
+    .st-key-top_controls [data-testid="stHorizontalBlock"] {
+      display:grid!important; grid-template-columns:minmax(0,1fr) 76px; gap:6px; width:100%; align-items:stretch;
+    }
+    .st-key-top_controls [data-testid="column"] { width:auto!important; min-width:0!important; flex:none!important; }
+    .st-key-top_controls [data-testid="stButton"] button { min-height:48px; padding:0 4px; font-size:.69rem; white-space:nowrap; }
 
     .hero {
       margin:12px 0 16px; padding:22px 16px; border-radius:19px;
@@ -247,35 +249,26 @@ metric_html = "".join(
 )
 st.markdown(f'<div class="metric-grid">{metric_html}</div>', unsafe_allow_html=True)
 
-if run:
-    state = "정상" if run["status"] == "success" else "부분 수집" if run["status"] == "partial" else "실패"
-    st.info(
-        f'마지막 수집: {state} · 고유 댓글 {run["unique_count"]:,}건 · '
-        f'분석 커버리지 {coverage:.1f}% · 부정 비중 {negative_rate:.1f}% · API {run["quota_units"]} units'
-    )
-
 with st.container(border=True):
     section_heading("시간대별 누적 조회수 추이")
     if history:
         hdf = pd.DataFrame(history)
         hdf["observed_at_utc"] = pd.to_datetime(hdf["observed_at_utc"], utc=True).dt.tz_convert("Asia/Seoul")
+        baseline = pd.DataFrame({"observed_at_utc":[published], "view_count":[0]})
+        chart_df = pd.concat([baseline, hdf[["observed_at_utc", "view_count"]]], ignore_index=True)
+        chart_df = chart_df.sort_values("observed_at_utc", kind="stable").drop_duplicates("observed_at_utc", keep="last")
         fig = go.Figure()
-        if len(hdf) == 1:
-            observed = hdf.iloc[0]["observed_at_utc"]
-            views = int(hdf.iloc[0]["view_count"])
-            fig.add_trace(go.Scatter(
-                x=[observed], y=[views], mode="markers+text",
-                marker=dict(size=11, color="#1768bd"),
-                text=[f"현재 {views:,}회"], textposition="top center",
-                textfont=dict(size=13, color="#1768bd"), hovertemplate="%{y:,}회<extra></extra>",
-            ))
-            fig.update_xaxes(range=[observed-pd.Timedelta(days=1), observed+pd.Timedelta(days=1)])
-        else:
-            fig.add_trace(go.Scatter(
-                x=hdf["observed_at_utc"], y=hdf["view_count"], mode="lines+markers",
-                line=dict(color="#1768bd", width=3), marker=dict(size=7, color="#1768bd"),
-                fill="tozeroy", fillcolor="rgba(23,104,189,.09)", hovertemplate="%{y:,}회<extra></extra>",
-            ))
+        fig.add_trace(go.Scatter(
+            x=chart_df["observed_at_utc"], y=chart_df["view_count"], mode="lines+markers",
+            line=dict(color="#1768bd", width=3), marker=dict(size=7, color="#1768bd"),
+            fill="tozeroy", fillcolor="rgba(23,104,189,.09)", hovertemplate="%{y:,}회<extra></extra>",
+        ))
+        latest_point = chart_df.iloc[-1]
+        fig.add_annotation(
+            x=latest_point["observed_at_utc"], y=latest_point["view_count"],
+            text=f'현재 {int(latest_point["view_count"]):,}회', showarrow=False,
+            yshift=16, xanchor="right", font=dict(size=12, color="#1768bd"),
+        )
         fig.update_layout(
             height=310, margin=dict(l=8, r=8, t=34, b=8), paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)", xaxis_title="", yaxis_title="",
